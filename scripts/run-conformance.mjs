@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +39,7 @@ function resolveRunnerBinary() {
 }
 
 const runner = resolveRunnerBinary();
+chmodSync(adapterPath, 0o755);
 execFileSync(runner, ['-corpus', corpusPath, adapterPath], {
   cwd: rootDir,
   stdio: 'inherit',

@@ -30,7 +30,7 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && chmod +x dist/bin/protoc-gen-omnibuf-es.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
