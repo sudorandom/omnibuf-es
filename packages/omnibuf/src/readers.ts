@@ -1,0 +1,1297 @@
+// ============================================================================
+// O(1) Header-Hop Field Readers & Zero-Decode Wire Splicing (Opaque API)
+// ============================================================================
+
+import { Encoder, mapHeaderByte } from './encoder.js';
+import {
+  WireBoolFalse,
+  WireBoolTrue,
+  WireBytes,
+  WireFixed32,
+  WireFixed64,
+  WireFixedArr,
+  WireMap,
+  WireSint,
+  WireSintArr,
+  WireString,
+  WireStringArr,
+  WireSubMsg,
+  WireSubMsgArr,
+  WireUint,
+  WireUintArr,
+  decodeUTF8,
+  decodeVarint,
+  decodeVarintAuto,
+  decodeVarintBigInt,
+  decodeZigZag,
+  decodeZigZagAuto,
+  decodeZigZagBigInt,
+  float32FromBits,
+  float64FromBits,
+  locateField,
+  nextContainerField,
+  skipValue,
+} from './wire.js';
+
+// ============================================================================
+// Scalar Readers
+// ============================================================================
+
+export function readUint(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireUint) return [0, false];
+  const [v, n] = decodeVarint(valSlice, 0);
+  return [v, n > 0];
+}
+
+export function readUintBigInt(packet: Uint8Array, fieldNum: number): [value: bigint, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireUint) return [0n, false];
+  const [v, n] = decodeVarintBigInt(valSlice, 0);
+  return [v, n > 0];
+}
+
+export function readUintAuto(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number | bigint, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireUint) return [0, false];
+  const [v, n] = decodeVarintAuto(valSlice, 0);
+  return [v, n > 0];
+}
+
+export function readInt(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireSint) return [0, false];
+  const [u, n] = decodeVarintBigInt(valSlice, 0);
+  if (n === 0) return [0, false];
+  return [decodeZigZag(u), true];
+}
+
+export function readIntBigInt(packet: Uint8Array, fieldNum: number): [value: bigint, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireSint) return [0n, false];
+  const [u, n] = decodeVarintBigInt(valSlice, 0);
+  if (n === 0) return [0n, false];
+  return [decodeZigZagBigInt(u), true];
+}
+
+export function readIntAuto(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number | bigint, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireSint) return [0, false];
+  const [u, n] = decodeVarintBigInt(valSlice, 0);
+  if (n === 0) return [0, false];
+  return [decodeZigZagAuto(u), true];
+}
+
+export function readBool(packet: Uint8Array, fieldNum: number): [value: boolean, ok: boolean] {
+  const { wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || (wireType !== WireBoolTrue && wireType !== WireBoolFalse)) {
+    return [false, false];
+  }
+  return [wireType === WireBoolTrue, true];
+}
+
+export function readFixed32(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireFixed32 || valSlice.length < 4) {
+    return [0, false];
+  }
+  const bits =
+    (valSlice[0]! | (valSlice[1]! << 8) | (valSlice[2]! << 16) | (valSlice[3]! << 24)) >>> 0;
+  return [bits, true];
+}
+
+export function readSfixed32(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const [bits, ok] = readFixed32(packet, fieldNum);
+  if (!ok) return [0, false];
+  return [bits | 0, true];
+}
+
+export function readFloat32(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const [bits, ok] = readFixed32(packet, fieldNum);
+  if (!ok) return [0, false];
+  return [float32FromBits(bits), true];
+}
+
+export function readFixed64(packet: Uint8Array, fieldNum: number): [value: bigint, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireFixed64 || valSlice.length < 8) {
+    return [0n, false];
+  }
+  let u64 = 0n;
+  for (let i = 7; i >= 0; i--) {
+    u64 = (u64 << 8n) | BigInt(valSlice[i]!);
+  }
+  return [u64, true];
+}
+
+export function readFixed64Auto(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number | bigint, ok: boolean] {
+  const [u64, ok] = readFixed64(packet, fieldNum);
+  if (!ok) return [0, false];
+  return [u64 <= 9007199254740991n ? Number(u64) : u64, true];
+}
+
+export function readSfixed64(packet: Uint8Array, fieldNum: number): [value: bigint, ok: boolean] {
+  const [u64, ok] = readFixed64(packet, fieldNum);
+  if (!ok) return [0n, false];
+  return [BigInt.asIntN(64, u64), true];
+}
+
+export function readSfixed64Auto(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number | bigint, ok: boolean] {
+  const [s64, ok] = readSfixed64(packet, fieldNum);
+  if (!ok) return [0, false];
+  return [s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64, true];
+}
+
+export function readFloat64(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const [bits, ok] = readFixed64(packet, fieldNum);
+  if (!ok) return [0, false];
+  return [float64FromBits(bits), true];
+}
+
+export function readStringBytes(
+  packet: Uint8Array,
+  fieldNum: number,
+): [bytes: Uint8Array, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireString || valSlice.length === 0) {
+    return [new Uint8Array(0), false];
+  }
+  const b0 = valSlice[0]!;
+  if ((b0 & 1) !== 0) {
+    const strLen = b0 >>> 1;
+    if (1 + strLen > valSlice.length) {
+      return [new Uint8Array(0), false];
+    }
+    return [valSlice.subarray(1, 1 + strLen), true];
+  }
+  const [sLen, sn] = decodeVarintBigInt(valSlice, 0);
+  if (sn === 0 || sLen > BigInt(valSlice.length - sn)) {
+    return [new Uint8Array(0), false];
+  }
+  return [valSlice.subarray(sn, sn + Number(sLen)), true];
+}
+
+export function readString(packet: Uint8Array, fieldNum: number): [value: string, ok: boolean] {
+  const [b, ok] = readStringBytes(packet, fieldNum);
+  if (!ok) return ['', false];
+  return [decodeUTF8(b), true];
+}
+
+export function readBytes(packet: Uint8Array, fieldNum: number): [value: Uint8Array, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireBytes) {
+    return [new Uint8Array(0), false];
+  }
+  const [bLen, bn] = decodeVarintBigInt(valSlice, 0);
+  if (bn === 0 || bLen > BigInt(valSlice.length - bn)) {
+    return [new Uint8Array(0), false];
+  }
+  return [valSlice.subarray(bn, bn + Number(bLen)), true];
+}
+
+// ============================================================================
+// Sub-Message & Sub-Message Array Readers
+// ============================================================================
+
+export function readSubMsg(
+  packet: Uint8Array,
+  fieldNum: number,
+): [subPacket: Uint8Array, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireSubMsg) {
+    return [new Uint8Array(0), false];
+  }
+  const [subLen, sn] = decodeVarintBigInt(valSlice, 0);
+  if (sn === 0 || subLen > BigInt(valSlice.length - sn)) {
+    return [new Uint8Array(0), false];
+  }
+  return [valSlice.subarray(sn, sn + Number(subLen)), true];
+}
+
+export function readElem(arrPayload: Uint8Array, index: number): [elem: Uint8Array, ok: boolean] {
+  if (index < 0) return [new Uint8Array(0), false];
+  let pos = 0;
+  const n = arrPayload.length;
+  for (let i = 0; pos < n; i++) {
+    let elemLen = 0;
+    let en = 0;
+    const b0 = arrPayload[pos]!;
+    if ((b0 & 2) !== 0) {
+      if (pos + 2 > n) return [new Uint8Array(0), false];
+      elemLen = ((b0 | (arrPayload[pos + 1]! << 8)) >>> 2) | 0;
+      en = 2;
+    } else {
+      const [l64, ln] = decodeVarintBigInt(arrPayload, pos);
+      if (ln === 0 || l64 > BigInt(n - (pos + ln))) {
+        return [new Uint8Array(0), false];
+      }
+      elemLen = Number(l64);
+      en = ln;
+    }
+    pos += en;
+    if (elemLen > n - pos) {
+      return [new Uint8Array(0), false];
+    }
+    if (i === index) {
+      return [arrPayload.subarray(pos, pos + elemLen), true];
+    }
+    pos += elemLen;
+  }
+  return [new Uint8Array(0), false];
+}
+
+export function countSubMsgArrElems(arrPayload: Uint8Array): [count: number, ok: boolean] {
+  let pos = 0;
+  const n = arrPayload.length;
+  let count = 0;
+  while (pos < n) {
+    const b0 = arrPayload[pos]!;
+    if ((b0 & 2) !== 0) {
+      if (pos + 2 > n) return [0, false];
+      const el = (b0 | (arrPayload[pos + 1]! << 8)) >>> 2;
+      pos += 2 + el;
+      if (pos > n) return [0, false];
+      count++;
+      continue;
+    }
+    if ((b0 & 1) !== 0) {
+      pos += 1 + (b0 >>> 1);
+      if (pos > n) return [0, false];
+      count++;
+      continue;
+    }
+    const [el, en] = decodeVarintBigInt(arrPayload, pos);
+    if (en === 0 || el > BigInt(n - (pos + en))) {
+      return [0, false];
+    }
+    pos += en + Number(el);
+    count++;
+  }
+  return [count, pos === n];
+}
+
+export function subMsgArrLen(packet: Uint8Array, fieldNum: number): number {
+  let total = 0;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireSubMsgArr,
+      0,
+    );
+    if (!valid) return 0;
+    if (!matched) return total;
+    pos = nextPos;
+    const [c, ok] = countSubMsgArrElems(body);
+    if (!ok) return 0;
+    total += c;
+  }
+}
+
+export function readSubMsgArrElem(
+  packet: Uint8Array,
+  fieldNum: number,
+  index: number,
+): [elem: Uint8Array, ok: boolean] {
+  if (index < 0) return [new Uint8Array(0), false];
+  let remIdx = index;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireSubMsgArr,
+      0,
+    );
+    if (!valid || !matched) return [new Uint8Array(0), false];
+    pos = nextPos;
+    const [elem, ok] = readElem(body, remIdx);
+    if (ok) return [elem, true];
+    const [c, validArr] = countSubMsgArrElems(body);
+    if (!validArr) return [new Uint8Array(0), false];
+    remIdx -= c;
+  }
+}
+
+export function readNestedStringBytes(
+  packet: Uint8Array,
+  subMsgField: number,
+  targetField: number,
+): [bytes: Uint8Array, ok: boolean] {
+  let lastBytes: Uint8Array = new Uint8Array(0);
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      subMsgField,
+      WireSubMsg,
+      0,
+    );
+    if (!valid) return [new Uint8Array(0), false];
+    if (!matched) return [lastBytes, found];
+    pos = nextPos;
+    const [b, ok] = readStringBytes(body, targetField);
+    if (ok) {
+      lastBytes = b;
+      found = true;
+    }
+  }
+}
+
+export function readNestedString(
+  packet: Uint8Array,
+  subMsgField: number,
+  targetField: number,
+): [value: string, ok: boolean] {
+  const [b, ok] = readNestedStringBytes(packet, subMsgField, targetField);
+  if (!ok) return ['', false];
+  return [decodeUTF8(b), true];
+}
+
+export function readArrNestedString(
+  packet: Uint8Array,
+  arrField: number,
+  index: number,
+  targetField: number,
+): [value: string, ok: boolean] {
+  const [elem, ok] = readSubMsgArrElem(packet, arrField, index);
+  if (!ok) return ['', false];
+  return readString(elem, targetField);
+}
+
+// ============================================================================
+// Packed & Counted Array Readers
+// ============================================================================
+
+export function countedArrLen(packet: Uint8Array, fieldNum: number, expWT: number): number {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== expWT) return 0;
+  const [bLen, bn] = decodeVarintBigInt(valSlice, 0);
+  if (bn === 0 || bLen > BigInt(valSlice.length - bn)) return 0;
+  const [c, cn] = decodeVarint(valSlice.subarray(bn, bn + Number(bLen)), 0);
+  if (cn === 0) return 0;
+  return c;
+}
+
+export function appendStringArrBody(dst: string[], body: Uint8Array): [out: string[], ok: boolean] {
+  const n = body.length;
+  if (n === 0) return [[], false];
+  let c = 0;
+  let p = 0;
+  const b0 = body[0]!;
+  if ((b0 & 1) !== 0) {
+    c = b0 >>> 1;
+    p = 1;
+  } else {
+    const [count, cn] = decodeVarintBigInt(body, 0);
+    if (cn === 0 || count > BigInt(n - cn)) {
+      return [[], false];
+    }
+    c = Number(count);
+    p = cn;
+  }
+  if (c > n - p) return [[], false];
+  for (let i = 0; i < c; i++) {
+    if (p >= n) return [[], false];
+    const sb = body[p]!;
+    let lenNum = 0;
+    if ((sb & 1) !== 0) {
+      lenNum = sb >>> 1;
+      p += 1;
+    } else if ((sb & 2) !== 0) {
+      if (p + 2 > n) return [[], false];
+      lenNum = (sb | (body[p + 1]! << 8)) >>> 2;
+      p += 2;
+    } else {
+      const [sLen, sn] = decodeVarintBigInt(body, p);
+      if (sn === 0 || sLen > BigInt(n - (p + sn))) {
+        return [[], false];
+      }
+      p += sn;
+      lenNum = Number(sLen);
+    }
+    if (p + lenNum > n) return [[], false];
+    dst.push(decodeUTF8(body, p, p + lenNum));
+    p += lenNum;
+  }
+  if (p !== n) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
+export function appendBytesArrBody(
+  dst: Uint8Array[],
+  body: Uint8Array,
+  zeroCopy = false,
+): [out: Uint8Array[], ok: boolean] {
+  const [count, cn] = decodeVarintBigInt(body, 0);
+  if (cn === 0 || count > BigInt(body.length - cn)) {
+    return [[], false];
+  }
+  const c = Number(count);
+  let p = cn;
+  for (let i = 0; i < c; i++) {
+    const [sLen, sn] = decodeVarintBigInt(body, p);
+    if (sn === 0 || sLen > BigInt(body.length - (p + sn))) {
+      return [[], false];
+    }
+    p += sn;
+    const lenNum = Number(sLen);
+    const sub = body.subarray(p, p + lenNum);
+    dst.push(zeroCopy ? sub : sub.slice());
+    p += lenNum;
+  }
+  if (p !== body.length) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
+export function appendBoolArrBody(dst: boolean[], body: Uint8Array): [out: boolean[], ok: boolean] {
+  const [count, cn] = decodeVarintBigInt(body, 0);
+  if (cn === 0 || count > BigInt(body.length - cn)) {
+    return [[], false];
+  }
+  const c = Number(count);
+  let p = cn;
+  for (let i = 0; i < c; i++) {
+    const [v, vn] = decodeVarintBigInt(body, p);
+    if (vn === 0) return [[], false];
+    p += vn;
+    dst.push(v !== 0n);
+  }
+  if (p !== body.length) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
+export function appendUint32ArrBody(dst: number[], body: Uint8Array): [out: number[], ok: boolean] {
+  const n = body.length;
+  if (n === 0) return [[], false];
+  let c = 0;
+  let p = 0;
+  const b0 = body[0]!;
+  if ((b0 & 1) !== 0) {
+    c = b0 >>> 1;
+    p = 1;
+  } else {
+    const [count, cn] = decodeVarintBigInt(body, 0);
+    if (cn === 0 || count > BigInt(n - cn)) {
+      return [[], false];
+    }
+    c = Number(count);
+    p = cn;
+  }
+  if (c > n - p) return [[], false];
+  for (let i = 0; i < c; i++) {
+    if (p >= n) return [[], false];
+    const vb = body[p]!;
+    if ((vb & 1) !== 0) {
+      dst.push(vb >>> 1);
+      p += 1;
+    } else if ((vb & 2) !== 0) {
+      if (p + 2 > n) return [[], false];
+      dst.push((vb | (body[p + 1]! << 8)) >>> 2);
+      p += 2;
+    } else if ((vb & 4) !== 0) {
+      if (p + 4 > n) return [[], false];
+      dst.push(
+        ((vb | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 3) >>> 0,
+      );
+      p += 4;
+    } else {
+      if (p + 9 > n) return [[], false];
+      const lo =
+        (body[p + 1]! | (body[p + 2]! << 8) | (body[p + 3]! << 16) | (body[p + 4]! << 24)) >>> 0;
+      dst.push(lo);
+      p += 9;
+    }
+  }
+  if (p !== n) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
+export function appendUintArrAutoBody(
+  dst: (number | bigint)[],
+  body: Uint8Array,
+): [out: (number | bigint)[], ok: boolean] {
+  const [count, cn] = decodeVarintBigInt(body, 0);
+  if (cn === 0 || count > BigInt(body.length - cn)) {
+    return [[], false];
+  }
+  const c = Number(count);
+  let p = cn;
+  for (let i = 0; i < c; i++) {
+    const [v, vn] = decodeVarintAuto(body, p);
+    if (vn === 0) return [[], false];
+    p += vn;
+    dst.push(v);
+  }
+  if (p !== body.length) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
+export function appendSintArrAutoBody(
+  dst: (number | bigint)[],
+  body: Uint8Array,
+): [out: (number | bigint)[], ok: boolean] {
+  const [count, cn] = decodeVarintBigInt(body, 0);
+  if (cn === 0 || count > BigInt(body.length - cn)) {
+    return [[], false];
+  }
+  const c = Number(count);
+  let p = cn;
+  for (let i = 0; i < c; i++) {
+    const [v, vn] = decodeVarintBigInt(body, p);
+    if (vn === 0) return [[], false];
+    p += vn;
+    dst.push(decodeZigZagAuto(v));
+  }
+  if (p !== body.length) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
+export function appendFloat32ArrBody(
+  dst: number[],
+  body: Uint8Array,
+): [out: number[], ok: boolean] {
+  if (body.length < 1 || body[0] !== WireFixed32 || (body.length - 1) % 4 !== 0) {
+    return [[], false];
+  }
+  const c = (body.length - 1) / 4;
+  for (let i = 0; i < c; i++) {
+    const off = 1 + i * 4;
+    const bits =
+      (body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24)) >>> 0;
+    dst.push(float32FromBits(bits));
+  }
+  return [dst, true];
+}
+
+export function appendFloat64ArrBody(
+  dst: number[],
+  body: Uint8Array,
+): [out: number[], ok: boolean] {
+  if (body.length < 1 || body[0] !== WireFixed64 || (body.length - 1) % 8 !== 0) {
+    return [[], false];
+  }
+  const c = (body.length - 1) / 8;
+  for (let i = 0; i < c; i++) {
+    const off = 1 + i * 8;
+    let u64 = 0n;
+    for (let b = 7; b >= 0; b--) {
+      u64 = (u64 << 8n) | BigInt(body[off + b]!);
+    }
+    dst.push(float64FromBits(u64));
+  }
+  return [dst, true];
+}
+
+export function readStringArr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: string[], ok: boolean] {
+  const out: string[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireStringArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendStringArrBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readUint32Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number[], ok: boolean] {
+  const out: number[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireUintArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendUint32ArrBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readSintArr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: (number | bigint)[], ok: boolean] {
+  const out: (number | bigint)[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireSintArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendSintArrAutoBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readFloat32Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number[], ok: boolean] {
+  const out: number[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireFixedArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendFloat32ArrBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readFloat64Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number[], ok: boolean] {
+  const out: number[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireFixedArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendFloat64ArrBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readBytesArr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: Uint8Array[], ok: boolean] {
+  const out: Uint8Array[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireStringArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendBytesArrBody(out, body, false);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readBoolArr(packet: Uint8Array, fieldNum: number): [value: boolean[], ok: boolean] {
+  const out: boolean[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireUintArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendBoolArrBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readUintArr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: (number | bigint)[], ok: boolean] {
+  const out: (number | bigint)[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireUintArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendUintArrAutoBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readFixed32Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number[], ok: boolean] {
+  const out: number[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireFixedArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    if (body.length < 1 || body[0] !== WireFixed32 || (body.length - 1) % 4 !== 0) {
+      return [[], false];
+    }
+    found = true;
+    const c = (body.length - 1) / 4;
+    for (let i = 0; i < c; i++) {
+      const off = 1 + i * 4;
+      out.push(
+        (body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24)) >>>
+          0,
+      );
+    }
+  }
+}
+
+export function readSfixed32Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: number[], ok: boolean] {
+  const out: number[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireFixedArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    if (body.length < 1 || body[0] !== WireFixed32 || (body.length - 1) % 4 !== 0) {
+      return [[], false];
+    }
+    found = true;
+    const c = (body.length - 1) / 4;
+    for (let i = 0; i < c; i++) {
+      const off = 1 + i * 4;
+      out.push(
+        body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24) | 0,
+      );
+    }
+  }
+}
+
+export function readFixed64Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: (number | bigint)[], ok: boolean] {
+  const out: (number | bigint)[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireFixedArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    if (body.length < 1 || body[0] !== WireFixed64 || (body.length - 1) % 8 !== 0) {
+      return [[], false];
+    }
+    found = true;
+    const c = (body.length - 1) / 8;
+    for (let i = 0; i < c; i++) {
+      const off = 1 + i * 8;
+      let u64 = 0n;
+      for (let b = 7; b >= 0; b--) {
+        u64 = (u64 << 8n) | BigInt(body[off + b]!);
+      }
+      out.push(u64 <= 9007199254740991n ? Number(u64) : u64);
+    }
+  }
+}
+
+export function readSfixed64Arr(
+  packet: Uint8Array,
+  fieldNum: number,
+): [value: (number | bigint)[], ok: boolean] {
+  const out: (number | bigint)[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireFixedArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    if (body.length < 1 || body[0] !== WireFixed64 || (body.length - 1) % 8 !== 0) {
+      return [[], false];
+    }
+    found = true;
+    const c = (body.length - 1) / 8;
+    for (let i = 0; i < c; i++) {
+      const off = 1 + i * 8;
+      let u64 = 0n;
+      for (let b = 7; b >= 0; b--) {
+        u64 = (u64 << 8n) | BigInt(body[off + b]!);
+      }
+      const s64 = BigInt.asIntN(64, u64);
+      out.push(s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64);
+    }
+  }
+}
+
+export function readSubMsgMerged<T>(
+  packet: Uint8Array,
+  fieldNum: number,
+  decodeFn: (sub: Uint8Array, target?: T, merge?: boolean) => T,
+): [value: T | null, ok: boolean] {
+  let out: T | undefined;
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireSubMsg,
+      0,
+    );
+    if (!valid) return [null, false];
+    if (!matched) return [out ?? null, found];
+    pos = nextPos;
+    out = decodeFn(body, out, found);
+    found = true;
+  }
+}
+
+export function readSubMsgArrDecoded<T>(
+  packet: Uint8Array,
+  fieldNum: number,
+  decodeFn: (sub: Uint8Array) => T,
+): [value: T[], ok: boolean] {
+  const out: T[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireSubMsgArr,
+      0,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    const [count, ok] = countSubMsgArrElems(body);
+    if (!ok) return [[], false];
+    found = true;
+    let p = 0;
+    for (let i = 0; i < count; i++) {
+      const [el, en] = decodeVarintBigInt(body, p);
+      p += en;
+      const elNum = Number(el);
+      out.push(decodeFn(body.subarray(p, p + elNum)));
+      p += elNum;
+    }
+  }
+}
+
+function readMapEntryPayload(
+  body: Uint8Array,
+  p: number,
+  wt: number,
+  scalarKind: string,
+  decodeSubMsg?: (sub: Uint8Array) => any,
+): [val: any, nextPos: number] {
+  switch (wt) {
+    case WireString: {
+      const [len, ln] = decodeVarintBigInt(body, p);
+      if (ln === 0 || len > BigInt(body.length - (p + ln))) {
+        throw new Error('omnibuf: truncated map string');
+      }
+      const s = decodeUTF8(body, p + ln, p + ln + Number(len));
+      return [s, p + ln + Number(len)];
+    }
+    case WireBytes: {
+      const [len, ln] = decodeVarintBigInt(body, p);
+      if (ln === 0 || len > BigInt(body.length - (p + ln))) {
+        throw new Error('omnibuf: truncated map bytes');
+      }
+      const b = body.subarray(p + ln, p + ln + Number(len)).slice();
+      return [b, p + ln + Number(len)];
+    }
+    case WireUint: {
+      const [v, vn] = decodeVarintAuto(body, p);
+      if (vn === 0) throw new Error('omnibuf: truncated map uint');
+      if (scalarKind === 'bool') return [v !== 0 && v !== 0n, p + vn];
+      if (scalarKind === 'uint32' || scalarKind === 'enum') {
+        return [Number(BigInt(v) & 0xffffffffn) >>> 0, p + vn];
+      }
+      return [v, p + vn];
+    }
+    case WireSint: {
+      const [v, vn] = decodeVarintBigInt(body, p);
+      if (vn === 0) throw new Error('omnibuf: truncated map sint');
+      const s = decodeZigZagAuto(v);
+      if (scalarKind === 'int32' || scalarKind === 'sint32') {
+        return [Number(s) | 0, p + vn];
+      }
+      return [s, p + vn];
+    }
+    case WireFixed32: {
+      if (body.length - p < 4) throw new Error('omnibuf: truncated map fixed32');
+      const bits =
+        (body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 0;
+      if (scalarKind === 'float32') return [float32FromBits(bits), p + 4];
+      if (scalarKind === 'sfixed32') return [bits | 0, p + 4];
+      return [bits, p + 4];
+    }
+    case WireFixed64: {
+      if (body.length - p < 8) throw new Error('omnibuf: truncated map fixed64');
+      let u64 = 0n;
+      for (let b = 7; b >= 0; b--) {
+        u64 = (u64 << 8n) | BigInt(body[p + b]!);
+      }
+      if (scalarKind === 'float64') return [float64FromBits(u64), p + 8];
+      if (scalarKind === 'sfixed64') {
+        const s64 = BigInt.asIntN(64, u64);
+        return [s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64, p + 8];
+      }
+      return [u64 <= 9007199254740991n ? Number(u64) : u64, p + 8];
+    }
+    case WireSubMsg: {
+      const [len, ln] = decodeVarintBigInt(body, p);
+      if (ln === 0 || len > BigInt(body.length - (p + ln))) {
+        throw new Error('omnibuf: truncated map submsg');
+      }
+      const sub = body.subarray(p + ln, p + ln + Number(len));
+      return [decodeSubMsg ? decodeSubMsg(sub) : sub, p + ln + Number(len)];
+    }
+    default:
+      throw new Error(`omnibuf: unsupported map wire type ${wt}`);
+  }
+}
+
+export function readTypedMap<V = any>(
+  packet: Uint8Array,
+  fieldNum: number,
+  keyType: string,
+  valType: string,
+  decodeSubMsg?: (sub: Uint8Array) => V,
+): [value: Record<string, V>, ok: boolean] {
+  const out: Record<string, V> = {};
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(packet, pos, fieldNum, WireMap, 2);
+    if (!valid) return [{}, false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    const mapType = body[0]!;
+    const keyWT = mapType >>> 4;
+    const valWT = mapType & 0x0f;
+    const [count, cn] = decodeVarintBigInt(body, 1);
+    if (cn === 0 || count * 2n > BigInt(body.length - (1 + cn))) {
+      return [{}, false];
+    }
+    found = true;
+    const c = Number(count);
+    let p = 1 + cn;
+    for (let i = 0; i < c; i++) {
+      const [kVal, p1] = readMapEntryPayload(body, p, keyWT, keyType);
+      const [vVal, p2] = readMapEntryPayload(body, p1, valWT, valType, decodeSubMsg);
+      p = p2;
+      Object.defineProperty(out, String(kVal), {
+        value: vVal,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    if (p !== body.length) {
+      return [{}, false];
+    }
+  }
+}
+
+// ============================================================================
+// Zero-Allocation Map Lookup (LookupMapStringUint)
+// ============================================================================
+
+export function lookupMapStringUint(
+  packet: Uint8Array,
+  fieldNum: number,
+  targetKey: string,
+): [value: number | bigint, ok: boolean] {
+  let lastVal: number | bigint = 0;
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(packet, pos, fieldNum, WireMap, 2);
+    if (!valid) return [0, false];
+    if (!matched) return [lastVal, found];
+    pos = nextPos;
+    if (body[0] !== mapHeaderByte(WireString, WireUint)) {
+      return [0, false];
+    }
+    const [count, cn] = decodeVarintBigInt(body, 1);
+    if (cn === 0 || count > BigInt(body.length - (1 + cn))) {
+      return [0, false];
+    }
+    const c = Number(count);
+    let p = 1 + cn;
+    for (let i = 0; i < c; i++) {
+      const [kLen, kn] = decodeVarintBigInt(body, p);
+      if (kn === 0 || kLen > BigInt(body.length - (p + kn))) {
+        return [0, false];
+      }
+      p += kn;
+      const kLenNum = Number(kLen);
+      const k = decodeUTF8(body, p, p + kLenNum);
+      p += kLenNum;
+      const [v, vn] = decodeVarintAuto(body, p);
+      if (vn === 0) return [0, false];
+      p += vn;
+      if (k === targetKey) {
+        lastVal = v;
+        found = true;
+      }
+    }
+    if (p !== body.length) {
+      return [0, false];
+    }
+  }
+}
+
+// ============================================================================
+// Opaque API Runtime Support: Zero-Decode Wire Splicing (SpliceFields)
+// ============================================================================
+
+const sharedSpliceEncoder = new Encoder(8192);
+let sharedSpliceInUse = false;
+
+/**
+ * Splices unmodified contiguous byte ranges from `raw` and invokes `appendDirty`
+ * only for fields whose bit is set in `dirtyMask`, avoiding any decoding of untouched fields.
+ */
+export function spliceFields(
+  raw: Uint8Array,
+  dirtyMask: number | bigint,
+  maxField: number,
+  appendDirty: (enc: Encoder, fieldNum: number) => void,
+  enc?: Encoder,
+): Uint8Array {
+  if (maxField <= 30) {
+    const mask32 = typeof dirtyMask === 'bigint' ? Number(dirtyMask & 0x7fffffffn) : dirtyMask | 0;
+    if (mask32 === 0) {
+      return raw.slice();
+    }
+    const useShared = enc === undefined && !sharedSpliceInUse;
+    if (useShared) sharedSpliceInUse = true;
+    const activeEnc = enc ?? (useShared ? sharedSpliceEncoder : new Encoder(raw.length + 64));
+    const startPos = useShared ? activeEnc.beginMessage(raw.length + 128) : (activeEnc.reset(), 0);
+    try {
+      const n = raw.length;
+      let pos = 0;
+      let cleanStart = 0;
+      let emitted32 = 0;
+
+      while (pos < n) {
+        const fieldStart = pos;
+        let tag = 0;
+        const b0 = raw[pos]!;
+        if ((b0 & 1) !== 0) {
+          tag = b0 >>> 1;
+          pos += 1;
+        } else if ((b0 & 2) !== 0) {
+          if (pos + 2 > n) throw new Error('omnibuf: invalid tag while splicing');
+          tag = ((b0 | (raw[pos + 1]! << 8)) >>> 2) >>> 0;
+          pos += 2;
+        } else {
+          const [t64, width] = decodeVarintBigInt(raw, pos);
+          if (!width || t64 >> 4n > 0xffffffffn)
+            throw new Error('omnibuf: invalid tag while splicing');
+          tag = Number(t64);
+          pos += width;
+        }
+        const fnum = tag <= 0x7fffffff ? tag >>> 4 : Math.floor(tag / 16);
+        const wt = tag & 0x0f;
+        pos = skipValue(raw, pos, wt);
+        const fieldEnd = pos;
+
+        const bit = fnum <= maxField ? 1 << fnum : 0;
+        if ((mask32 & bit) !== 0) {
+          if (cleanStart < fieldStart) {
+            activeEnc.writeRaw(raw.subarray(cleanStart, fieldStart));
+          }
+          if ((emitted32 & bit) === 0) appendDirty(activeEnc, fnum);
+          emitted32 |= bit;
+          cleanStart = fieldEnd;
+        } else {
+          emitted32 |= bit;
+        }
+      }
+
+      if (cleanStart < n) {
+        activeEnc.writeRaw(raw.subarray(cleanStart, n));
+      }
+
+      const rem = mask32 & ~emitted32;
+      if (rem !== 0) {
+        for (let fnum = 1; fnum <= maxField; fnum++) {
+          if ((rem & (1 << fnum)) !== 0) {
+            appendDirty(activeEnc, fnum);
+          }
+        }
+      }
+
+      return useShared ? activeEnc.endMessage(startPos) : activeEnc.finish();
+    } finally {
+      if (useShared) sharedSpliceInUse = false;
+    }
+  }
+
+  const mask = typeof dirtyMask === 'bigint' ? dirtyMask : BigInt(dirtyMask >>> 0);
+  if (mask === 0n) {
+    return raw.slice();
+  }
+  const activeEnc = enc ?? new Encoder(raw.length + 64);
+  activeEnc.reset();
+  const n = raw.length;
+  let pos = 0;
+  let cleanStart = 0;
+  let emitted = 0n;
+
+  while (pos < n) {
+    const fieldStart = pos;
+    const [tag, width] = decodeVarintBigInt(raw, pos);
+    if (!width || tag >> 4n > 0xffffffffn) throw new Error('omnibuf: invalid tag while splicing');
+    const fnum = Number(tag >> 4n);
+    const wt = Number(tag & 15n);
+    pos = skipValue(raw, pos + width, wt);
+    const fieldEnd = pos;
+
+    const bit = fnum <= maxField ? 1n << BigInt(fnum) : 0n;
+    if ((mask & bit) !== 0n) {
+      if (cleanStart < fieldStart) {
+        activeEnc.writeRaw(raw.subarray(cleanStart, fieldStart));
+      }
+      if ((emitted & bit) === 0n) appendDirty(activeEnc, fnum);
+      emitted |= bit;
+      cleanStart = fieldEnd;
+    } else {
+      emitted |= bit;
+    }
+  }
+
+  if (cleanStart < n) {
+    activeEnc.writeRaw(raw.subarray(cleanStart, n));
+  }
+
+  const rem = mask & ~emitted;
+  if (rem !== 0n) {
+    for (let fnum = 1; fnum <= maxField; fnum++) {
+      if ((rem & (1n << BigInt(fnum))) !== 0n) {
+        appendDirty(activeEnc, fnum);
+      }
+    }
+  }
+
+  return activeEnc.finish();
+}

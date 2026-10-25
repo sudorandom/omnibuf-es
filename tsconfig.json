@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./packages/omnibuf" },
+    { "path": "./packages/omnibuf-web" },
+    { "path": "./packages/omnibuf-node" },
+    { "path": "./packages/protoc-gen-omnibuf-es" }
+  ]
+}

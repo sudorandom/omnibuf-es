@@ -1,0 +1,75 @@
+name: Release & Publish to npm
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, Verify & Publish to npmjs.com
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install tools via mise
+        uses: jdx/mise-action@v5
+        with:
+          install: true
+
+      - name: Configure npm registry authentication
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: just install
+
+      - name: Sync workspace package versions with release tag
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME:-}"
+          VERSION="${RAW_TAG#v}"
+          if [[ -n "$VERSION" && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Syncing package versions to $VERSION"
+            node -e '
+              const fs = require("node:fs");
+              const version = process.argv[1];
+              const files = [
+                "package.json",
+                "packages/omnibuf/package.json",
+                "packages/omnibuf-node/package.json",
+                "packages/omnibuf-web/package.json",
+                "packages/protoc-gen-omnibuf-es/package.json",
+              ];
+              for (const file of files) {
+                const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+                pkg.version = version;
+                fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+              }
+            ' "$VERSION"
+          fi
+
+      - name: Run full CI verification (format, lint, build, test, conformance)
+        run: just ci
+
+      - name: Publish workspace packages to npmjs.com
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME:-}"
+          if [[ "$RAW_TAG" =~ -(alpha|beta|rc|next) ]]; then
+            pnpm -r publish --access public --no-git-checks --provenance --tag next
+          else
+            pnpm -r publish --access public --no-git-checks --provenance
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

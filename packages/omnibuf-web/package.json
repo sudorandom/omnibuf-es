@@ -1,0 +1,47 @@
+{
+  "name": "@omnibuf/web",
+  "version": "0.1.0",
+  "description": "OmniBuf for browsers and frontend runtimes - Web Streams, Blob/Response helpers, and interactive wire inspection",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sudorandom/omnibuf-es.git",
+    "directory": "packages/omnibuf-web"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@omnibuf/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@bufbuild/protobuf": ">=1.0.0 || >=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@bufbuild/protobuf": {
+      "optional": true
+    }
+  }
+}
