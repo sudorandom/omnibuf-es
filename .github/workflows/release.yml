@@ -27,11 +27,8 @@ jobs:
         with:
           install: true
 
-      - name: Configure npm registry authentication
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: 'https://registry.npmjs.org'
+      - name: Ensure latest npm CLI for OIDC Trusted Publishing
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: just install
@@ -59,17 +56,21 @@ jobs:
               }
             ' "$VERSION"
           fi
+          pnpm run fmt
 
       - name: Run full CI verification (format, lint, build, test, conformance)
         run: just ci
 
       - name: Publish workspace packages to npmjs.com
         run: |
+          if [[ -n "${NPM_TOKEN:-}" ]]; then
+            npm config set "//registry.npmjs.org/:_authToken" "${NPM_TOKEN}"
+          fi
           RAW_TAG="${GITHUB_REF_NAME:-}"
-          if [[ "$RAW_TAG" =~ -(alpha|beta|rc|next) ]]; then
+          if [[ "$RAW_TAG" =~ -(alpha|beta|rc|next|stage) ]]; then
             pnpm -r publish --access public --no-git-checks --provenance --tag next
           else
             pnpm -r publish --access public --no-git-checks --provenance
           fi
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

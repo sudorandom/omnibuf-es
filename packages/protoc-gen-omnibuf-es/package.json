@@ -26,8 +26,7 @@
     "directory": "packages/protoc-gen-omnibuf-es"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/bin/protoc-gen-omnibuf-es.js",

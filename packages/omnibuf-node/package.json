@@ -26,8 +26,7 @@
     "directory": "packages/omnibuf-node"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/bin/conformance-es.js",
