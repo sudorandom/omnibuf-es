@@ -61,16 +61,18 @@ jobs:
       - name: Run full CI verification (format, lint, build, test, conformance)
         run: just ci
 
-      - name: Publish workspace packages to npmjs.com
+      - name: Pack & publish workspace packages to npmjs.com via npm OIDC
         run: |
-          if [[ -n "${NPM_TOKEN:-}" ]]; then
-            npm config set "//registry.npmjs.org/:_authToken" "${NPM_TOKEN}"
-          fi
           RAW_TAG="${GITHUB_REF_NAME:-}"
+          TAG_ARGS=()
           if [[ "$RAW_TAG" =~ -(alpha|beta|rc|next|stage) ]]; then
-            pnpm -r publish --access public --no-git-checks --provenance --tag next
-          else
-            pnpm -r publish --access public --no-git-checks --provenance
+            TAG_ARGS=(--tag next)
           fi
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          for pkg in packages/omnibuf packages/omnibuf-node packages/omnibuf-web packages/protoc-gen-omnibuf-es; do
+            echo "Packing and publishing $pkg..."
+            rm -f "$pkg"/*.tgz
+            (cd "$pkg" && pnpm pack)
+            tgz=$(ls "$pkg"/*.tgz | head -n 1)
+            npm publish "$tgz" --access public --provenance "${TAG_ARGS[@]}"
+            rm -f "$tgz"
+          done
