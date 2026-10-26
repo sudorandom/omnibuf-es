@@ -97,6 +97,100 @@ describe('@omnibuf/node - NodeBufferStringCodec & Node Streams Framing', () => {
 
     expect(out).toEqual([p1, p2]);
   });
+
+  it('preserves empty (0-byte) packets in createFrameDecoderStream and readFrames', async () => {
+    const encStream = createFrameEncoderStream();
+    const decStream = createFrameDecoderStream();
+    encStream.pipe(decStream);
+
+    const out: Buffer[] = [];
+    decStream.on('data', (chunk: Buffer) => out.push(chunk));
+
+    const empty = Buffer.alloc(0);
+    const nonEmpty = Buffer.from([42]);
+    encStream.write(empty);
+    encStream.write(nonEmpty);
+    encStream.write(empty);
+    encStream.end();
+
+    await new Promise<void>((resolve, reject) => {
+      decStream.on('end', resolve);
+      decStream.on('error', reject);
+    });
+
+    expect(out.length).toBe(3);
+    expect(out[0]!.length).toBe(0);
+    expect(out[1]).toEqual(nonEmpty);
+    expect(out[2]!.length).toBe(0);
+
+    // Also verify single empty frame on readFrames and createFrameDecoderStream
+    const singlePass = new PassThrough();
+    await writeFrame(singlePass, new Uint8Array(0));
+    singlePass.end();
+    const frames: Uint8Array[] = [];
+    for await (const f of readFrames(singlePass)) {
+      frames.push(f);
+    }
+    expect(frames.length).toBe(1);
+    expect(frames[0]!.byteLength).toBe(0);
+  });
+
+  it('rejects writeFrame() when Writable fails asynchronously after stream.write() returns true', async () => {
+    const { Writable } = await import('node:stream');
+    const failingWritable = new Writable({
+      highWaterMark: 64 * 1024,
+      write(_chunk, _encoding, callback) {
+        setTimeout(() => {
+          callback(new Error('asynchronous write failure after 10ms'));
+        }, 10);
+      },
+    });
+
+    await assert.rejects(
+      () => writeFrame(failingWritable, new Uint8Array([1, 2, 3])),
+      /asynchronous write failure after 10ms/,
+    );
+
+    // Also test backpressure (highWaterMark: 1) succeeding and failing asynchronously
+    const slowBackpressureWritable = new Writable({
+      highWaterMark: 1,
+      write(_chunk, _encoding, callback) {
+        setTimeout(() => callback(null), 10);
+      },
+    });
+    await writeFrame(slowBackpressureWritable, new Uint8Array([1, 2, 3, 4]));
+  });
+
+  it('reassembles heavily fragmented large frames in linear time without dropping or corrupting bytes', async () => {
+    const payload = new Uint8Array(64 * 1024);
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] = (i * 31 + 7) & 0xff;
+    }
+
+    const decStream = createFrameDecoderStream();
+    const out: Buffer[] = [];
+    decStream.on('data', (chunk: Buffer) => out.push(chunk));
+
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(payload.byteLength, 0);
+    // Feed header 1 byte at a time
+    for (let i = 0; i < 4; i++) {
+      decStream.write(header.subarray(i, i + 1));
+    }
+    // Feed 64 KiB payload in small 17-byte fragments
+    for (let i = 0; i < payload.byteLength; i += 17) {
+      decStream.write(payload.subarray(i, Math.min(i + 17, payload.byteLength)));
+    }
+    decStream.end();
+
+    await new Promise<void>((resolve, reject) => {
+      decStream.on('end', resolve);
+      decStream.on('error', reject);
+    });
+
+    expect(out.length).toBe(1);
+    expect(new Uint8Array(out[0]!)).toEqual(payload);
+  });
 });
 
 describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conformance Corpus', () => {

@@ -357,3 +357,262 @@ it('resolves nested messages, colliding short names, cross-file imports, enums, 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it('CLI executable handles cross-file references, colliding field names, negative enums, and multi-member oneof wire packets', async () => {
+  const { spawn } = await import('node:child_process');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { pathToFileURL, fileURLToPath } = await import('node:url');
+  const {
+    create: pbCreate,
+    toBinary: pbToBinary,
+    fromBinary: pbFromBinary,
+  } = await import('@bufbuild/protobuf');
+  const {
+    CodeGeneratorRequestSchema,
+    CodeGeneratorResponseSchema,
+    FieldDescriptorProto_Label,
+    FieldDescriptorProto_Type,
+  } = await import('@bufbuild/protobuf/wkt');
+  const ts = await import('typescript');
+
+  const cliBinPath = fileURLToPath(
+    new URL('../dist/bin/protoc-gen-omnibuf-es.js', import.meta.url),
+  );
+
+  const reqMsg = pbCreate(CodeGeneratorRequestSchema, {
+    fileToGenerate: ['common.proto', 'service.proto'],
+    protoFile: [
+      {
+        name: 'common.proto',
+        package: 'common',
+        syntax: 'proto3',
+        enumType: [
+          {
+            name: 'ErrorCode',
+            value: [
+              { name: 'ERR_UNKNOWN', number: -1 },
+              { name: 'ERR_NONE', number: 0 },
+              { name: 'ERR_FATAL', number: -100 },
+            ],
+          },
+        ],
+        messageType: [
+          {
+            name: 'Item',
+            field: [
+              {
+                name: 'id',
+                number: 1,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.STRING,
+              },
+              {
+                name: 'code',
+                number: 2,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.ENUM,
+                typeName: '.common.ErrorCode',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        name: 'service.proto',
+        package: 'service',
+        syntax: 'proto3',
+        dependency: ['common.proto'],
+        messageType: [
+          {
+            name: 'Envelope',
+            oneofDecl: [{ name: 'choice' }],
+            field: [
+              {
+                name: 'item',
+                number: 1,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.MESSAGE,
+                typeName: '.common.Item',
+              },
+              {
+                name: 'raw',
+                number: 2,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.STRING,
+              },
+              {
+                name: 'marshal',
+                number: 3,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.UINT32,
+              },
+              {
+                name: 'dirty_mask',
+                number: 4,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.INT32,
+              },
+              {
+                name: 'a',
+                number: 5,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.STRING,
+                oneofIndex: 0,
+              },
+              {
+                name: 'b',
+                number: 6,
+                label: FieldDescriptorProto_Label.OPTIONAL,
+                type: FieldDescriptorProto_Type.STRING,
+                oneofIndex: 0,
+              },
+              {
+                name: 'codes',
+                number: 7,
+                label: FieldDescriptorProto_Label.REPEATED,
+                type: FieldDescriptorProto_Type.ENUM,
+                typeName: '.common.ErrorCode',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const reqBytes = pbToBinary(CodeGeneratorRequestSchema, reqMsg);
+
+  const stdoutBytes = await new Promise<Uint8Array>((resolve, reject) => {
+    const child = spawn(process.execPath, [cliBinPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    child.stdout.on('data', (c: Buffer) => outChunks.push(c));
+    child.stderr.on('data', (c: Buffer) => errChunks.push(c));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(`CLI exited with code ${code}: ${Buffer.concat(errChunks).toString('utf8')}`),
+        );
+        return;
+      }
+      resolve(new Uint8Array(Buffer.concat(outChunks)));
+    });
+    child.stdin.end(Buffer.from(reqBytes));
+  });
+
+  const resp = pbFromBinary(CodeGeneratorResponseSchema, stdoutBytes);
+  assert.equal(resp.error, '');
+  assert.equal(resp.file.length, 2);
+
+  const dir = await mkdtemp(fileURLToPath(new URL('./generated-cli-', import.meta.url)));
+  try {
+    const commonPath = `${dir}/common_omnibuf.pb.ts`;
+    const servicePath = `${dir}/service_omnibuf.pb.ts`;
+    const commonFile = resp.file.find((f) => f.name === 'common_omnibuf.pb.ts')!;
+    const serviceFile = resp.file.find((f) => f.name === 'service_omnibuf.pb.ts')!;
+    assert.ok(commonFile);
+    assert.ok(serviceFile);
+    assert.match(
+      serviceFile.content,
+      /import[\s\S]*ItemSchema[\s\S]*from ["']\.\/common_omnibuf\.pb\.js["']/,
+    );
+
+    await writeFile(commonPath, commonFile.content);
+    await writeFile(servicePath, serviceFile.content);
+
+    const program = ts.createProgram([commonPath, servicePath], {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.NodeNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeNext,
+      strict: true,
+      skipLibCheck: true,
+      noEmit: true,
+    });
+    assert.deepEqual(
+      ts
+        .getPreEmitDiagnostics(program)
+        .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')),
+      [],
+    );
+
+    const commonMod = await import(pathToFileURL(commonPath).href);
+    const svcMod = await import(pathToFileURL(servicePath).href);
+
+    // 1. Verify colliding field names (`raw`, `marshal`, `dirty_mask`) and negative enums
+    const env = svcMod.createEnvelope({
+      item: { id: 'item-1', code: commonMod.ErrorCode.ERR_UNKNOWN },
+      raw: 'raw-field-payload',
+      marshal: 777,
+      dirtyMask: -99,
+      choice: { case: 'a', value: 'initial-a' },
+      codes: [
+        commonMod.ErrorCode.ERR_UNKNOWN,
+        commonMod.ErrorCode.ERR_NONE,
+        commonMod.ErrorCode.ERR_FATAL,
+      ],
+    });
+    const encoded = svcMod.marshalEnvelopeOmniBuf(env);
+    const decoded = svcMod.decodeEnvelope(encoded);
+    assert.equal(decoded.item.id, 'item-1');
+    assert.equal(decoded.item.code, -1);
+    assert.equal(decoded.raw, 'raw-field-payload');
+    assert.equal(decoded.marshal, 777);
+    assert.equal(decoded.dirtyMask, -99);
+    assert.deepEqual(decoded.codes, [-1, 0, -100]);
+
+    const opEnv = new svcMod.OpaqueEnvelope(encoded);
+    assert.equal(opEnv.getRaw(), 'raw-field-payload');
+    assert.equal(opEnv.getMarshal(), 777);
+    assert.equal(opEnv.getDirtyMask(), -99);
+    assert.deepEqual(opEnv.getCodes(), [-1, 0, -100]);
+    assert.equal(opEnv.raw(), encoded);
+    opEnv.setRaw('updated-raw');
+    opEnv.setMarshal(888);
+    const reEncoded = opEnv.marshal();
+    const reDecoded = svcMod.decodeEnvelope(reEncoded);
+    assert.equal(reDecoded.raw, 'updated-raw');
+    assert.equal(reDecoded.marshal, 888);
+    assert.equal(reDecoded.item.code, -1);
+
+    // 2. Verify oneof wire packet containing member `a` followed by member `b`
+    const pktA = svcMod.marshalEnvelopeOmniBuf({
+      raw: 'keep-me',
+      choice: { case: 'a', value: 'superseded-a' },
+    });
+    const pktB = svcMod.marshalEnvelopeOmniBuf({
+      raw: 'keep-me',
+      choice: { case: 'b', value: 'winner-b' },
+    });
+    const combinedOneofPkt = new Uint8Array(pktA.length + pktB.length);
+    combinedOneofPkt.set(pktA, 0);
+    combinedOneofPkt.set(pktB, pktA.length);
+
+    // Full decoder selects b
+    const fullDecoded = svcMod.decodeEnvelope(combinedOneofPkt);
+    assert.deepEqual(fullDecoded.choice, { case: 'b', value: 'winner-b' });
+
+    // Reflective schema decoder also selects b
+    const schemaDecoded = svcMod.EnvelopeSchema.decode(combinedOneofPkt);
+    assert.deepEqual(schemaDecoded.choice, { case: 'b', value: 'winner-b' });
+
+    // Opaque getter exposes only winner b, not superseded a
+    const opaqueCombined = new svcMod.OpaqueEnvelope(combinedOneofPkt);
+    assert.equal(opaqueCombined.getA(), undefined);
+    assert.equal(opaqueCombined.getB(), 'winner-b');
+
+    // Calling setA("replacement") and marshaling clears b on the wire so decoding selects a = "replacement"
+    opaqueCombined.setA('replacement');
+    assert.equal(opaqueCombined.getA(), 'replacement');
+    assert.equal(opaqueCombined.getB(), undefined);
+
+    const marshaledAfterSetA = opaqueCombined.marshal();
+    const afterSetADecoded = svcMod.decodeEnvelope(marshaledAfterSetA);
+    assert.deepEqual(afterSetADecoded.choice, { case: 'a', value: 'replacement' });
+    assert.equal(afterSetADecoded.raw, 'keep-me');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

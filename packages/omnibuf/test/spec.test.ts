@@ -311,3 +311,223 @@ it('supports real @bufbuild/protobuf v2 descriptors with oneofs, proto3_optional
   mergeFromBinary(TreeNodeDesc, cloned, patch);
   assert.deepEqual(cloned.payload, { case: 'textVal', value: 'overridden' });
 });
+
+it('negative enum values round-trip across scalar, repeated, and map fields', async () => {
+  const { defineMessage, readEnum, readEnumArr, readTypedMap } = await import('../src/index.js');
+
+  const EnumHolder = defineMessage<{
+    status: number;
+    history: number[];
+    byKey: Record<string, number>;
+  }>('EnumHolder', {
+    status: { fieldNum: 1, type: 'enum' },
+    history: { fieldNum: 2, type: 'enum[]' },
+    byKey: { fieldNum: 3, type: 'map', mapKey: 'string', mapVal: 'enum' },
+  });
+
+  const input = {
+    status: -1,
+    history: [-1, 0, 1, -2147483648, 2147483647],
+    byKey: { negOne: -1, minInt: -2147483648, pos: 42 },
+  };
+
+  const wire = EnumHolder.encode(input, { deterministic: true });
+  const decoded = EnumHolder.decode(wire);
+
+  assert.equal(decoded.status, -1);
+  assert.deepEqual(decoded.history, [-1, 0, 1, -2147483648, 2147483647]);
+  assert.deepEqual(decoded.byKey, { negOne: -1, minInt: -2147483648, pos: 42 });
+
+  // Verify Opaque reader helpers match reflective decode
+  assert.deepEqual(readEnum(wire, 1), [-1, true]);
+  assert.deepEqual(readEnumArr(wire, 2), [[-1, 0, 1, -2147483648, 2147483647], true]);
+  assert.deepEqual(readTypedMap(wire, 3, 'string', 'enum'), [
+    { negOne: -1, minInt: -2147483648, pos: 42 },
+    true,
+  ]);
+});
+
+it('differential equivalence across MessageSchema, DescriptorRegistry, Opaque readers, and decodeBlind', async () => {
+  const {
+    DescriptorRegistry,
+    WireString,
+    WireSubMsg,
+    WireUint,
+    activeOneofSlice,
+    decodeBlind,
+    readEnum,
+    readEnumArr,
+    readString,
+    readSubMsgMerged,
+    readTypedMap,
+  } = await import('../src/index.js');
+
+  const fds = {
+    file: [
+      {
+        name: 'diff.proto',
+        package: 'diff',
+        syntax: 'proto3',
+        enumType: [
+          {
+            name: 'Kind',
+            value: [
+              { name: 'KIND_NEG', number: -5 },
+              { name: 'KIND_ZERO', number: 0 },
+              { name: 'KIND_POS', number: 7 },
+            ],
+          },
+        ],
+        messageType: [
+          {
+            name: 'Sub',
+            field: [
+              { name: 'a', number: 1, label: 'LABEL_OPTIONAL', type: 'TYPE_UINT32' },
+              { name: 'tags', number: 2, label: 'LABEL_REPEATED', type: 'TYPE_STRING' },
+            ],
+          },
+          {
+            name: 'Record',
+            oneofDecl: [{ name: 'pick' }],
+            field: [
+              {
+                name: 'kind',
+                number: 1,
+                label: 'LABEL_OPTIONAL',
+                type: 'TYPE_ENUM',
+                typeName: '.diff.Kind',
+              },
+              {
+                name: 'kinds',
+                number: 2,
+                label: 'LABEL_REPEATED',
+                type: 'TYPE_ENUM',
+                typeName: '.diff.Kind',
+              },
+              {
+                name: 'pick_str',
+                number: 3,
+                label: 'LABEL_OPTIONAL',
+                type: 'TYPE_STRING',
+                oneofIndex: 0,
+              },
+              {
+                name: 'pick_uint',
+                number: 4,
+                label: 'LABEL_OPTIONAL',
+                type: 'TYPE_UINT32',
+                oneofIndex: 0,
+              },
+              {
+                name: 'pick_sub',
+                number: 5,
+                label: 'LABEL_OPTIONAL',
+                type: 'TYPE_MESSAGE',
+                typeName: '.diff.Sub',
+                oneofIndex: 0,
+              },
+              {
+                name: 'kind_map',
+                number: 6,
+                label: 'LABEL_REPEATED',
+                type: 'TYPE_MESSAGE',
+                typeName: '.diff.Record.KindMapEntry',
+              },
+            ],
+            nestedType: [
+              {
+                name: 'KindMapEntry',
+                options: { mapEntry: true },
+                field: [
+                  { name: 'key', number: 1, label: 'LABEL_OPTIONAL', type: 'TYPE_STRING' },
+                  {
+                    name: 'value',
+                    number: 2,
+                    label: 'LABEL_OPTIONAL',
+                    type: 'TYPE_ENUM',
+                    typeName: '.diff.Kind',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  const reg = new DescriptorRegistry(fds);
+  const RecordSchema = reg.getSchema('diff.Record')!;
+  const SubSchema = reg.getSchema('diff.Sub')!;
+
+  // Construct a multi-part wire packet where:
+  // - part 1 sets kind = -5, kinds = [-5], pick_sub = { a: 10, tags: ['x'] }, kind_map = { k1: -5 }
+  // - part 2 switches oneof to pick_str = 'middle'
+  // - part 3 switches oneof back to pick_sub = { tags: ['y'] } (must NOT merge with part 1's pick_sub because part 2 cleared it!), and appends kinds = [7], kind_map = { k2: 7 }
+  const p1 = RecordSchema.encode(
+    {
+      kind: -5,
+      kinds: [-5],
+      pick: { case: 'pickSub', value: { a: 10, tags: ['x'] } },
+      kindMap: { k1: -5 },
+    } as any,
+    { selfDescribing: true },
+  );
+  const p2 = RecordSchema.encode({
+    kind: -5,
+    pick: { case: 'pickStr', value: 'middle' },
+  } as any);
+  const p3 = RecordSchema.encode(
+    {
+      kind: -5,
+      kinds: [7],
+      pick: { case: 'pickSub', value: { a: 99, tags: ['y'] } },
+      kindMap: { k2: 7 },
+    } as any,
+    { selfDescribing: true },
+  );
+
+  const combined = new Uint8Array(p1.length + p2.length + p3.length);
+  combined.set(p1, 0);
+  combined.set(p2, p1.length);
+  combined.set(p3, p1.length + p2.length);
+
+  // Path 1: MessageSchema.decode
+  const decodedSchema = RecordSchema.decode(combined) as any;
+  // Path 2: DescriptorRegistry.decode
+  const decodedReg = reg.decode('diff.Record', combined) as any;
+
+  assert.equal(decodedSchema.kind, -5);
+  assert.deepEqual(decodedSchema.kinds, [-5, 7]);
+  assert.deepEqual(decodedSchema.kindMap, { k1: -5, k2: 7 });
+  assert.equal(decodedSchema.pick.case, 'pickSub');
+  assert.equal(decodedSchema.pick.value.a, 99);
+  assert.deepEqual(decodedSchema.pick.value.tags, ['y']);
+  assert.deepEqual(decodedReg, decodedSchema);
+
+  // Path 3: Opaque readers + activeOneofSlice
+  const oneofSpecs: ReadonlyArray<readonly [number, number]> = [
+    [3, 1 << WireString],
+    [4, 1 << WireUint],
+    [5, 1 << WireSubMsg],
+  ];
+  assert.deepEqual(readEnum(combined, 1), [-5, true]);
+  assert.deepEqual(readEnumArr(combined, 2), [[-5, 7], true]);
+  assert.deepEqual(readTypedMap(combined, 6, 'string', 'enum'), [{ k1: -5, k2: 7 }, true]);
+  assert.equal(activeOneofSlice(combined, 3, oneofSpecs), null);
+  assert.equal(activeOneofSlice(combined, 4, oneofSpecs), null);
+  const subSlice = activeOneofSlice(combined, 5, oneofSpecs);
+  assert.ok(subSlice);
+  const [opaqueSub, okSub] = readSubMsgMerged(subSlice, 5, (sub, target, merge) =>
+    SubSchema.decode(sub, target, 0, { merge }),
+  );
+  assert.equal(okSub, true);
+  assert.equal((opaqueSub as any).a, 99);
+  assert.deepEqual((opaqueSub as any).tags, ['y']);
+  assert.equal(readString(combined, 3)[0], 'middle'); // raw locateField sees superseded field 3, which is why activeOneofSlice is required
+
+  // Path 4: Blind decoder (sees raw unsigned varint on wire and merges repeated/maps)
+  const blind = decodeBlind(combined) as any;
+  assert.equal(blind.kind, 4294967291);
+  assert.deepEqual(blind.kinds, [4294967291, 7]);
+});

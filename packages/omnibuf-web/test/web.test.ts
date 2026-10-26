@@ -151,6 +151,67 @@ describe('@omnibuf/web - Browser codecs, Binary Helpers, Web Streams, and Packet
     expect(decodedPackets).toEqual(packets);
   });
 
+  it('preserves empty packets and reassembles heavily fragmented large frames in Web TransformStreams', async () => {
+    const largePayload = new Uint8Array(32 * 1024);
+    for (let i = 0; i < largePayload.length; i++) {
+      largePayload[i] = (i * 19 + 3) & 0xff;
+    }
+    const packets = [new Uint8Array(0), largePayload, new Uint8Array(0)];
+
+    const encodeStream = createOmniBufEncodeStream();
+    const decodeStream = createOmniBufDecodeStream();
+
+    const encodedChunks: Uint8Array[] = [];
+    const encodeWriter = encodeStream.writable.getWriter();
+    const encodeReader = encodeStream.readable.getReader();
+
+    const encodeWritePromise = (async () => {
+      for (const p of packets) {
+        await encodeWriter.write(p);
+      }
+      await encodeWriter.close();
+    })();
+
+    while (true) {
+      const { done, value } = await encodeReader.read();
+      if (done) break;
+      encodedChunks.push(value);
+    }
+    await encodeWritePromise;
+
+    const totalBytes = encodedChunks.reduce((acc, c) => acc + c.byteLength, 0);
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const c of encodedChunks) {
+      combined.set(c, offset);
+      offset += c.byteLength;
+    }
+
+    const decodeWriter = decodeStream.writable.getWriter();
+    const decodeReader = decodeStream.readable.getReader();
+
+    const writePromise = (async () => {
+      // Split header and payload into small 13-byte fragments
+      for (let i = 0; i < combined.length; i += 13) {
+        await decodeWriter.write(combined.subarray(i, Math.min(i + 13, combined.length)));
+      }
+      await decodeWriter.close();
+    })();
+
+    const decodedPackets: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await decodeReader.read();
+      if (done) break;
+      decodedPackets.push(value);
+    }
+    await writePromise;
+
+    expect(decodedPackets.length).toBe(3);
+    expect(decodedPackets[0]!.byteLength).toBe(0);
+    expect(decodedPackets[1]).toEqual(largePayload);
+    expect(decodedPackets[2]!.byteLength).toBe(0);
+  });
+
   it('inspects self-describing packets with byte offsets, wire type names, and decoded values', () => {
     const pkt = TelemetryEvent.encode(
       {

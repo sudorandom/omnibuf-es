@@ -15,6 +15,7 @@ import { Encoder, mapHeaderByte } from './encoder.js';
 import {
   appendBoolArrBody,
   appendBytesArrBody,
+  appendEnumArrBody,
   appendFloat32ArrBody,
   appendFloat64ArrBody,
   appendSintArrAutoBody,
@@ -506,8 +507,8 @@ export class MessageSchema<
       };
 
       if (effectiveType === 'map') {
-        const mk = spec.mapKey ?? 'string';
-        const mv = spec.mapVal ?? 'uint64';
+        const mk = spec.mapKey ?? (spec as any).mapKeyType ?? 'string';
+        const mv = spec.mapVal ?? (spec as any).mapValType ?? 'uint64';
         cf.mapKeyType = mk;
         cf.mapValType = mv;
         cf.mapKeyWT = mk === 'bool' ? WireUint : scalarWireType(mk);
@@ -1842,8 +1843,7 @@ function decodeCompiledFieldValue(
   const n = data.length;
 
   switch (f.effectiveType) {
-    case 'uint32':
-    case 'enum': {
+    case 'uint32': {
       if (pos < n && (data[pos]! & 7) !== 0) {
         const [v, vn] = decodeVarint(data, pos);
         if (vn === 0) throw new Error(`omnibuf: truncated uint32 at ${pos}`);
@@ -1853,6 +1853,18 @@ function decodeCompiledFieldValue(
       const [v, vn] = decodeVarintBigInt(data, pos);
       if (vn === 0) throw new Error(`omnibuf: truncated uint32 at ${pos}`);
       out[key] = Number(v & 0xffffffffn) >>> 0;
+      return pos + vn;
+    }
+    case 'enum': {
+      if (pos < n && (data[pos]! & 7) !== 0) {
+        const [v, vn] = decodeVarint(data, pos);
+        if (vn === 0) throw new Error(`omnibuf: truncated enum at ${pos}`);
+        out[key] = v | 0;
+        return pos + vn;
+      }
+      const [v, vn] = decodeVarintBigInt(data, pos);
+      if (vn === 0) throw new Error(`omnibuf: truncated enum at ${pos}`);
+      out[key] = Number(v & 0xffffffffn) | 0;
       return pos + vn;
     }
     case 'uint64': {
@@ -1967,12 +1979,19 @@ function decodeCompiledFieldValue(
       out[key] = arr;
       return nextPos;
     }
-    case 'uint32[]':
-    case 'enum[]': {
+    case 'uint32[]': {
       const [body, nextPos] = readLenSlice(data, pos, 1);
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendUint32ArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid uint32 array at ${pos}`);
+      out[key] = arr;
+      return nextPos;
+    }
+    case 'enum[]': {
+      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
+      const [arr, ok] = appendEnumArrBody(prev, body);
+      if (!ok) throw new Error(`omnibuf: invalid enum array at ${pos}`);
       out[key] = arr;
       return nextPos;
     }
@@ -2081,10 +2100,12 @@ function decodeCompiledFieldValue(
         throw new Error(`omnibuf: missing subSchema on ${key}`);
       }
       const existing = out[key];
-      const targetSub = existing && typeof existing === 'object' ? existing : subSchema.create();
+      const hasExisting =
+        existing !== undefined && existing !== null && typeof existing === 'object';
+      const targetSub = hasExisting ? existing : subSchema.create();
       out[key] = subSchema.decode(subBytes, targetSub, depth + 1, {
         ...options,
-        merge: alreadySeen,
+        merge: f.oneof ? alreadySeen && hasExisting : alreadySeen,
       });
       return nextPos;
     }
@@ -2252,9 +2273,12 @@ function decodeMapFieldBody(
     );
     const convert = (v: any, type: ScalarFieldType | 'submsg' | undefined): any => {
       if (type === 'bool') return v !== 0 && v !== 0n;
-      if (type === 'float32') return float32FromBits(Number(v));
+      if (type === 'float32') return roundFloat32Shortest(float32FromBits(Number(v)));
       if (type === 'float64') return float64FromBits(BigInt(v));
-      if (type === 'sfixed32' || type === 'int32' || type === 'sint32') return Number(v) | 0;
+      if (type === 'uint32') return Number(BigInt(v) & 0xffffffffn) >>> 0;
+      if (type === 'sfixed32' || type === 'int32' || type === 'sint32' || type === 'enum') {
+        return Number(BigInt(v) & 0xffffffffn) | 0;
+      }
       if (type === 'sfixed64') {
         const signed = BigInt.asIntN(64, BigInt(v));
         return f.useBigInt || signed < -9007199254740991n || signed > 9007199254740991n

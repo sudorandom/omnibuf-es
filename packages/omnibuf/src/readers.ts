@@ -1,5 +1,5 @@
 // ============================================================================
-// O(1) Header-Hop Field Readers & Zero-Decode Wire Splicing (Opaque API)
+// Header-Scanning Field Readers (O(1) Per-Field Skip) & Wire Splicing (Opaque API)
 // ============================================================================
 
 import { Encoder, mapHeaderByte } from './encoder.js';
@@ -26,10 +26,12 @@ import {
   decodeZigZag,
   decodeZigZagAuto,
   decodeZigZagBigInt,
+  fastSkipValue,
   float32FromBits,
   float64FromBits,
   locateField,
   nextContainerField,
+  roundFloat32Shortest,
   skipValue,
 } from './wire.js';
 
@@ -42,6 +44,14 @@ export function readUint(packet: Uint8Array, fieldNum: number): [value: number, 
   if (!ok || wireType !== WireUint) return [0, false];
   const [v, n] = decodeVarint(valSlice, 0);
   return [v, n > 0];
+}
+
+export function readEnum(packet: Uint8Array, fieldNum: number): [value: number, ok: boolean] {
+  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
+  if (!ok || wireType !== WireUint) return [0, false];
+  const [v, n] = decodeVarintBigInt(valSlice, 0);
+  if (n === 0) return [0, false];
+  return [Number(v & 0xffffffffn) | 0, true];
 }
 
 export function readUintBigInt(packet: Uint8Array, fieldNum: number): [value: bigint, ok: boolean] {
@@ -532,6 +542,55 @@ export function appendUint32ArrBody(dst: number[], body: Uint8Array): [out: numb
   return [dst, true];
 }
 
+export function appendEnumArrBody(dst: number[], body: Uint8Array): [out: number[], ok: boolean] {
+  const n = body.length;
+  if (n === 0) return [[], false];
+  let c = 0;
+  let p = 0;
+  const b0 = body[0]!;
+  if ((b0 & 1) !== 0) {
+    c = b0 >>> 1;
+    p = 1;
+  } else {
+    const [count, cn] = decodeVarintBigInt(body, 0);
+    if (cn === 0 || count > BigInt(n - cn)) {
+      return [[], false];
+    }
+    c = Number(count);
+    p = cn;
+  }
+  if (c > n - p) return [[], false];
+  for (let i = 0; i < c; i++) {
+    if (p >= n) return [[], false];
+    const vb = body[p]!;
+    if ((vb & 1) !== 0) {
+      dst.push((vb >>> 1) | 0);
+      p += 1;
+    } else if ((vb & 2) !== 0) {
+      if (p + 2 > n) return [[], false];
+      dst.push(((vb | (body[p + 1]! << 8)) >>> 2) | 0);
+      p += 2;
+    } else if ((vb & 4) !== 0) {
+      if (p + 4 > n) return [[], false];
+      dst.push(
+        (((vb | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 3) >>> 0) |
+          0,
+      );
+      p += 4;
+    } else {
+      if (p + 9 > n) return [[], false];
+      const lo =
+        body[p + 1]! | (body[p + 2]! << 8) | (body[p + 3]! << 16) | (body[p + 4]! << 24) | 0;
+      dst.push(lo);
+      p += 9;
+    }
+  }
+  if (p !== n) {
+    return [[], false];
+  }
+  return [dst, true];
+}
+
 export function appendUintArrAutoBody(
   dst: (number | bigint)[],
   body: Uint8Array,
@@ -656,6 +715,27 @@ export function readUint32Arr(
     pos = nextPos;
     found = true;
     const [, ok] = appendUint32ArrBody(out, body);
+    if (!ok) return [[], false];
+  }
+}
+
+export function readEnumArr(packet: Uint8Array, fieldNum: number): [value: number[], ok: boolean] {
+  const out: number[] = [];
+  let found = false;
+  let pos = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireUintArr,
+      1,
+    );
+    if (!valid) return [[], false];
+    if (!matched) return [out, found];
+    pos = nextPos;
+    found = true;
+    const [, ok] = appendEnumArrBody(out, body);
     if (!ok) return [[], false];
   }
 }
@@ -1020,8 +1100,11 @@ function readMapEntryPayload(
       const [v, vn] = decodeVarintAuto(body, p);
       if (vn === 0) throw new Error('omnibuf: truncated map uint');
       if (scalarKind === 'bool') return [v !== 0 && v !== 0n, p + vn];
-      if (scalarKind === 'uint32' || scalarKind === 'enum') {
+      if (scalarKind === 'uint32') {
         return [Number(BigInt(v) & 0xffffffffn) >>> 0, p + vn];
+      }
+      if (scalarKind === 'enum') {
+        return [Number(BigInt(v) & 0xffffffffn) | 0, p + vn];
       }
       return [v, p + vn];
     }
@@ -1038,7 +1121,7 @@ function readMapEntryPayload(
       if (body.length - p < 4) throw new Error('omnibuf: truncated map fixed32');
       const bits =
         (body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 0;
-      if (scalarKind === 'float32') return [float32FromBits(bits), p + 4];
+      if (scalarKind === 'float32') return [roundFloat32Shortest(float32FromBits(bits)), p + 4];
       if (scalarKind === 'sfixed32') return [bits | 0, p + 4];
       return [bits, p + 4];
     }
@@ -1160,8 +1243,73 @@ export function lookupMapStringUint(
 }
 
 // ============================================================================
-// Opaque API Runtime Support: Zero-Decode Wire Splicing (SpliceFields)
+// Opaque API Runtime Support: Oneof Resolution & Zero-Decode Wire Splicing
 // ============================================================================
+
+/**
+ * Scans top-level field headers in `packet` to determine which member of a `oneof` group
+ * is selected ("last valid write wins"). If `targetField` is the active member, returns
+ * the suffix slice of `packet` starting at the beginning of `targetField`'s final uninterrupted
+ * streak; otherwise returns `null`.
+ */
+export function activeOneofSlice(
+  packet: Uint8Array,
+  targetField: number,
+  oneofSpecs: readonly (readonly [fieldNum: number, wireMask: number])[],
+): Uint8Array | null {
+  let pos = 0;
+  const n = packet.length;
+  let activeField = -1;
+  let streakStart = 0;
+
+  while (pos < n) {
+    const fieldStart = pos;
+    let fnum = 0;
+    let wt = 0;
+    const b0 = packet[pos]!;
+    if ((b0 & 1) !== 0) {
+      fnum = b0 >>> 5;
+      wt = (b0 >>> 1) & 0x0f;
+      pos += 1;
+    } else if ((b0 & 2) !== 0) {
+      if (pos + 2 > n) return null;
+      const u16 = (b0 | (packet[pos + 1]! << 8)) >>> 2;
+      fnum = u16 >>> 4;
+      wt = u16 & 0x0f;
+      pos += 2;
+    } else {
+      const [tag, tn] = decodeVarintBigInt(packet, pos);
+      if (tn === 0 || tag >> 4n > 0xffffffffn) {
+        return null;
+      }
+      fnum = Number(tag >> 4n);
+      wt = Number(tag & 0x0fn);
+      pos += tn;
+    }
+
+    for (let i = 0; i < oneofSpecs.length; i++) {
+      const spec = oneofSpecs[i]!;
+      if (spec[0] === fnum && ((spec[1] >>> wt) & 1) !== 0) {
+        if (activeField !== fnum) {
+          activeField = fnum;
+          streakStart = fieldStart;
+        }
+        break;
+      }
+    }
+
+    const nextPos = fastSkipValue(packet, pos, wt);
+    if (nextPos < 0) {
+      return null;
+    }
+    pos = nextPos;
+  }
+
+  if (activeField !== targetField) {
+    return null;
+  }
+  return packet.subarray(streakStart);
+}
 
 const sharedSpliceEncoder = new Encoder(8192);
 let sharedSpliceInUse = false;

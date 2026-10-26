@@ -81,6 +81,16 @@ function buildSymbolRegistry(files: FileDescriptorProtoJSON[]): SymbolRegistry {
   for (const file of files) {
     const fileName = file.name ?? 'messages.proto';
     const pkg = file.package ?? '';
+    const usedExportNames = new Set<string>();
+    const allocateExportName = (base: string): string => {
+      let candidate = base;
+      let suffix = 1;
+      while (usedExportNames.has(candidate)) {
+        candidate = `${base}$${suffix++}`;
+      }
+      usedExportNames.add(candidate);
+      return candidate;
+    };
 
     for (const en of file.enumType ?? []) {
       const enName = en.name ?? 'Enum';
@@ -88,7 +98,7 @@ function buildSymbolRegistry(files: FileDescriptorProtoJSON[]): SymbolRegistry {
       enums.set(fullProtoName, {
         fullProtoName,
         fileProtoName: fileName,
-        exportName: enName,
+        exportName: allocateExportName(enName),
         desc: en,
       });
     }
@@ -100,7 +110,7 @@ function buildSymbolRegistry(files: FileDescriptorProtoJSON[]): SymbolRegistry {
     ): void => {
       const msgName = msg.name ?? 'Message';
       const fullProtoName = protoPrefix ? `${protoPrefix}.${msgName}` : msgName;
-      const exportName = tsPrefix ? `${tsPrefix}_${msgName}` : msgName;
+      const rawExportName = tsPrefix ? `${tsPrefix}_${msgName}` : msgName;
 
       if (msg.options?.mapEntry) {
         const kf = (msg.field ?? []).find((x) => x.number === 1);
@@ -113,6 +123,7 @@ function buildSymbolRegistry(files: FileDescriptorProtoJSON[]): SymbolRegistry {
         return;
       }
 
+      const exportName = allocateExportName(rawExportName);
       messages.set(fullProtoName, {
         fullProtoName,
         fileProtoName: fileName,
@@ -126,7 +137,7 @@ function buildSymbolRegistry(files: FileDescriptorProtoJSON[]): SymbolRegistry {
         enums.set(enFull, {
           fullProtoName: enFull,
           fileProtoName: fileName,
-          exportName: `${exportName}_${enName}`,
+          exportName: allocateExportName(`${exportName}_${enName}`),
           desc: en,
         });
       }
@@ -174,6 +185,7 @@ interface ResolvedOneof {
   index: number;
   protoName: string;
   localName: string;
+  emitProtoAlias: boolean;
   fields: ResolvedField[];
 }
 
@@ -181,7 +193,12 @@ interface ResolvedField {
   number: number;
   name: string;
   localName: string;
+  emitNameAlias: boolean;
   pascalName: string;
+  storageProp: string;
+  getterName: string;
+  setterName: string;
+  shorthandMethods: string[];
   type: number;
   repeated: boolean;
   isMap: boolean;
@@ -203,6 +220,7 @@ function tsTypeForField(f: ResolvedField): string {
       repeated: false,
       type: f.mapValType,
       subMsgSymbol: f.mapValMsgSymbol,
+      oneofLocalName: undefined,
       explicitPresence: false,
     }).replace(' | null', '');
     return `Record<string, ${valTs}>`;
@@ -236,7 +254,9 @@ function tsTypeForField(f: ResolvedField): string {
       break;
   }
   if (f.repeated) return `${base}[]`;
-  if (f.type === ProtoScalarType.MESSAGE) return `${base} | null`;
+  if (f.type === ProtoScalarType.MESSAGE) {
+    return f.oneofLocalName ? `${base} | null | undefined` : `${base} | null`;
+  }
   if (f.explicitPresence || f.oneofLocalName) return `${base} | undefined`;
   return base;
 }
@@ -335,6 +355,9 @@ function emitMapPayload(type: number, subMsgSymbol: string | undefined, value: s
     case ProtoScalarType.SINT32:
     case ProtoScalarType.SINT64:
       return `enc.writeRawVarint(encodeZigZag(BigInt(${value})));`;
+    case ProtoScalarType.UINT32:
+    case ProtoScalarType.ENUM:
+      return `enc.writeRawVarint(Number(${value}) >>> 0);`;
     default:
       return `enc.writeRawVarint(BigInt(${value}));`;
   }
@@ -343,9 +366,9 @@ function emitMapPayload(type: number, subMsgSymbol: string | undefined, value: s
 function emitFieldValueAccess(f: ResolvedField, objExpr: string): string {
   if (f.oneofLocalName) {
     const g = `((${objExpr} as any).${f.oneofLocalName} ?? ${f.oneofProtoName && f.oneofProtoName !== f.oneofLocalName ? `(${objExpr} as any).${f.oneofProtoName}` : 'undefined'})`;
-    return `((${g} && typeof ${g} === 'object' && 'case' in ${g}) ? ((${g}.case === ${JSON.stringify(f.localName)} || ${g}.case === ${JSON.stringify(f.name)}) ? (${g}.value as any) : undefined) : ((${objExpr} as any).${f.localName} ?? ${f.localName !== f.name ? `(${objExpr} as any).${f.name}` : 'undefined'}))`;
+    return `((${g} && typeof ${g} === 'object' && 'case' in ${g}) ? ((${g}.case === ${JSON.stringify(f.localName)} || ${g}.case === ${JSON.stringify(f.name)}) ? (${g}.value as any) : undefined) : ((${objExpr} as any).${f.localName} ?? ${f.emitNameAlias ? `(${objExpr} as any).${f.name}` : 'undefined'}))`;
   }
-  return f.localName !== f.name
+  return f.emitNameAlias
     ? `(${objExpr}.${f.localName} ?? ${objExpr}.${f.name})`
     : `${objExpr}.${f.localName}`;
 }
@@ -448,8 +471,9 @@ function emitEncodeScalarOrSubMsgWithVar(f: ResolvedField, val: string, indent: 
 
   switch (f.type) {
     case ProtoScalarType.UINT32:
-    case ProtoScalarType.UINT64:
     case ProtoScalarType.ENUM:
+      return `${indent}enc.writeUint(${num}, Number(${val} ?? 0) >>> 0);`;
+    case ProtoScalarType.UINT64:
       return `${indent}enc.writeUint(${num}, ${val} ?? 0);`;
     case ProtoScalarType.INT32:
     case ProtoScalarType.INT64:
@@ -586,12 +610,18 @@ function emitDecodeMapEntryInline(
         `${indent}${targetVar} = __u !== 0n; p += __un;`,
       ].join('\n');
     case ProtoScalarType.UINT32:
-    case ProtoScalarType.ENUM:
       return [
         `${indent}if (${wtVar} !== 0) throw new Error('omnibuf: invalid map uint32 wire type');`,
         `${indent}const [__u, __un] = decodeVarintBigInt(body, p);`,
         `${indent}if (__un === 0) throw new Error('omnibuf: truncated map uint32');`,
         `${indent}${targetVar} = Number(__u & 0xffffffffn) >>> 0; p += __un;`,
+      ].join('\n');
+    case ProtoScalarType.ENUM:
+      return [
+        `${indent}if (${wtVar} !== 0) throw new Error('omnibuf: invalid map enum wire type');`,
+        `${indent}const [__u, __un] = decodeVarintBigInt(body, p);`,
+        `${indent}if (__un === 0) throw new Error('omnibuf: truncated map enum');`,
+        `${indent}${targetVar} = Number(__u & 0xffffffffn) | 0; p += __un;`,
       ].join('\n');
     case ProtoScalarType.UINT64:
       return [
@@ -720,12 +750,19 @@ function emitDecodeFieldCaseBody(f: ResolvedField, indent: string): string {
           `${indent}${prop} = arr; pos = nextPos;`,
         ].join('\n');
       case ProtoScalarType.UINT32:
-      case ProtoScalarType.ENUM:
         return [
           `${indent}const [body, nextPos] = readLenSlice(buf, pos, 1);`,
           `${indent}const prev = alreadySeen && Array.isArray(${prop}) ? ${prop} : [];`,
           `${indent}const [arr, ok] = appendUint32ArrBody(prev, body);`,
           `${indent}if (!ok) throw new Error('omnibuf: invalid uint32 array');`,
+          `${indent}${prop} = arr as any; pos = nextPos;`,
+        ].join('\n');
+      case ProtoScalarType.ENUM:
+        return [
+          `${indent}const [body, nextPos] = readLenSlice(buf, pos, 1);`,
+          `${indent}const prev = alreadySeen && Array.isArray(${prop}) ? ${prop} : [];`,
+          `${indent}const [arr, ok] = appendEnumArrBody(prev, body);`,
+          `${indent}if (!ok) throw new Error('omnibuf: invalid enum array');`,
           `${indent}${prop} = arr as any; pos = nextPos;`,
         ].join('\n');
       case ProtoScalarType.UINT64:
@@ -821,11 +858,17 @@ function emitDecodeFieldCaseBody(f: ResolvedField, indent: string): string {
 
   switch (f.type) {
     case ProtoScalarType.UINT32:
-    case ProtoScalarType.ENUM:
       return [
         `${indent}const [v, vn] = decodeVarintBigInt(buf, pos);`,
         `${indent}if (vn === 0) throw new Error('omnibuf: truncated uint32');`,
         `${indent}${emitAssignDecodedField(f, '(Number(v & 0xffffffffn) >>> 0) as any')}`,
+        `${indent}pos += vn;`,
+      ].join('\n');
+    case ProtoScalarType.ENUM:
+      return [
+        `${indent}const [v, vn] = decodeVarintBigInt(buf, pos);`,
+        `${indent}if (vn === 0) throw new Error('omnibuf: truncated enum');`,
+        `${indent}${emitAssignDecodedField(f, '(Number(v & 0xffffffffn) | 0) as any')}`,
         `${indent}pos += vn;`,
       ].join('\n');
     case ProtoScalarType.UINT64:
@@ -913,10 +956,13 @@ function emitDecodeFieldCaseBody(f: ResolvedField, indent: string): string {
       const existingExpr = f.oneofLocalName
         ? `((out as any).${f.oneofLocalName}?.case === ${JSON.stringify(f.localName)} ? (out as any).${f.oneofLocalName}.value : undefined)`
         : prop;
+      const mergeExpr = f.oneofLocalName
+        ? 'alreadySeen && existing !== undefined && existing !== null'
+        : 'alreadySeen';
       return [
         `${indent}const [subBytes, nextPos] = readLenSlice(buf, pos, 0);`,
         `${indent}const existing = ${existingExpr};`,
-        `${indent}const decodedSub = decode${sub}(subBytes, existing ?? undefined, depth + 1, { ...options, merge: alreadySeen });`,
+        `${indent}const decodedSub = decode${sub}(subBytes, existing ?? undefined, depth + 1, { ...options, merge: ${mergeExpr} });`,
         `${indent}${emitAssignDecodedField(f, 'decodedSub')}`,
         `${indent}pos = nextPos;`,
       ].join('\n');
@@ -926,7 +972,39 @@ function emitDecodeFieldCaseBody(f: ResolvedField, indent: string): string {
   }
 }
 
-function emitOpaqueGetterBody(f: ResolvedField): string {
+function wireMaskForField(f: ResolvedField): number {
+  switch (f.type) {
+    case ProtoScalarType.UINT32:
+    case ProtoScalarType.UINT64:
+    case ProtoScalarType.ENUM:
+      return 1 << 0;
+    case ProtoScalarType.INT32:
+    case ProtoScalarType.INT64:
+    case ProtoScalarType.SINT32:
+    case ProtoScalarType.SINT64:
+      return 1 << 12;
+    case ProtoScalarType.BOOL:
+      return (1 << 1) | (1 << 2);
+    case ProtoScalarType.STRING:
+      return 1 << 3;
+    case ProtoScalarType.BYTES:
+      return 1 << 4;
+    case ProtoScalarType.MESSAGE:
+      return 1 << 5;
+    case ProtoScalarType.FLOAT:
+    case ProtoScalarType.FIXED32:
+    case ProtoScalarType.SFIXED32:
+      return 1 << 10;
+    case ProtoScalarType.DOUBLE:
+    case ProtoScalarType.FIXED64:
+    case ProtoScalarType.SFIXED64:
+      return 1 << 11;
+    default:
+      return 1 << 0;
+  }
+}
+
+function emitOpaqueGetterBody(f: ResolvedField, oneof?: ResolvedOneof): string {
   const num = f.number;
   if (f.isMap) {
     const keyKind = schemaTypeString({ type: f.mapKeyType, repeated: false, isMap: false });
@@ -943,8 +1021,9 @@ function emitOpaqueGetterBody(f: ResolvedField): string {
       case ProtoScalarType.BOOL:
         return `return readBoolArr(this._raw, ${num})[0];`;
       case ProtoScalarType.UINT32:
-      case ProtoScalarType.ENUM:
         return `return readUint32Arr(this._raw, ${num})[0] as any;`;
+      case ProtoScalarType.ENUM:
+        return `return readEnumArr(this._raw, ${num})[0] as any;`;
       case ProtoScalarType.UINT64:
         return `return readUintArr(this._raw, ${num})[0];`;
       case ProtoScalarType.SINT32:
@@ -972,46 +1051,52 @@ function emitOpaqueGetterBody(f: ResolvedField): string {
     }
   }
   if (f.explicitPresence || f.oneofLocalName) {
+    const srcExpr = oneof ? 'slice' : 'this._raw';
+    const oneofPreamble = oneof
+      ? `const slice = activeOneofSlice(this._raw, ${num}, [${oneof.fields.map((of) => `[${of.number}, ${wireMaskForField(of)}]`).join(', ')}]); if (!slice) return undefined; `
+      : '';
     switch (f.type) {
       case ProtoScalarType.UINT32:
+        return `${oneofPreamble}const [v, ok] = readUint(${srcExpr}, ${num}); return (ok ? v : undefined) as any;`;
       case ProtoScalarType.ENUM:
-        return `const [v, ok] = readUint(this._raw, ${num}); return (ok ? v : undefined) as any;`;
+        return `${oneofPreamble}const [v, ok] = readEnum(${srcExpr}, ${num}); return (ok ? v : undefined) as any;`;
       case ProtoScalarType.UINT64:
-        return `const [v, ok] = readUintAuto(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readUintAuto(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.INT32:
       case ProtoScalarType.SINT32:
-        return `const [v, ok] = readInt(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readInt(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.INT64:
       case ProtoScalarType.SINT64:
-        return `const [v, ok] = readIntAuto(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readIntAuto(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.BOOL:
-        return `const [v, ok] = readBool(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readBool(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.STRING:
-        return `const [v, ok] = readString(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readString(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.BYTES:
-        return `const [v, ok] = readBytes(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readBytes(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.FIXED32:
-        return `const [v, ok] = readFixed32(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readFixed32(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.SFIXED32:
-        return `const [v, ok] = readSfixed32(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readSfixed32(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.FLOAT:
-        return `const [v, ok] = readFloat32(this._raw, ${num}); return ok ? roundFloat32Shortest(v) : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readFloat32(${srcExpr}, ${num}); return ok ? roundFloat32Shortest(v) : undefined;`;
       case ProtoScalarType.FIXED64:
-        return `const [v, ok] = readFixed64Auto(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readFixed64Auto(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.SFIXED64:
-        return `const [v, ok] = readSfixed64Auto(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readSfixed64Auto(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.DOUBLE:
-        return `const [v, ok] = readFloat64(this._raw, ${num}); return ok ? v : undefined;`;
+        return `${oneofPreamble}const [v, ok] = readFloat64(${srcExpr}, ${num}); return ok ? v : undefined;`;
       case ProtoScalarType.MESSAGE:
-        return `return readSubMsgMerged<${f.subMsgSymbol}>(this._raw, ${num}, (sub, target, merge) => decode${f.subMsgSymbol}(sub, target, 0, { merge }))[0];`;
+        return `${oneofPreamble}const [v, ok] = readSubMsgMerged<${f.subMsgSymbol}>(${srcExpr}, ${num}, (sub, target, merge) => decode${f.subMsgSymbol}(sub, target, 0, { merge })); return ok ? v : undefined;`;
       default:
         return `return undefined as any;`;
     }
   }
   switch (f.type) {
     case ProtoScalarType.UINT32:
-    case ProtoScalarType.ENUM:
       return `return readUint(this._raw, ${num})[0] as any;`;
+    case ProtoScalarType.ENUM:
+      return `return readEnum(this._raw, ${num})[0] as any;`;
     case ProtoScalarType.UINT64:
       return `return readUintAuto(this._raw, ${num})[0];`;
     case ProtoScalarType.INT32:
@@ -1059,7 +1144,84 @@ export function generateFileCode(
   // Collect all enums and messages declared in THIS file in declaration order
   const localEnums: EnumSymbolInfo[] = [];
   const localMessages: MessageSymbolInfo[] = [];
-  const localExportNames = new Set<string>();
+  const localExportNames = new Set<string>([
+    'Encoder',
+    'MaxNestingDepth',
+    'activeOneofSlice',
+    'appendBoolArrBody',
+    'appendBytesArrBody',
+    'appendEnumArrBody',
+    'appendFloat32ArrBody',
+    'appendFloat64ArrBody',
+    'appendSintArrAutoBody',
+    'appendStringArrBody',
+    'appendUint32ArrBody',
+    'appendUintArrAutoBody',
+    'countSubMsgArrElems',
+    'decodeSchemaMeta',
+    'decodeUTF8',
+    'decodeVarintAuto',
+    'decodeVarintBigInt',
+    'decodeZigZag',
+    'decodeZigZagAuto',
+    'defineMessage',
+    'encodeZigZag',
+    'float32FromBits',
+    'float64FromBits',
+    'readBool',
+    'readBoolArr',
+    'readBytes',
+    'readBytesArr',
+    'readEnum',
+    'readEnumArr',
+    'readFixed32',
+    'readFixed32Arr',
+    'readFixed64Auto',
+    'readFixed64Arr',
+    'readFloat32',
+    'readFloat32Arr',
+    'readFloat64',
+    'readFloat64Arr',
+    'readInt',
+    'readIntAuto',
+    'readLenSlice',
+    'readSfixed32',
+    'readSfixed32Arr',
+    'readSfixed64Auto',
+    'readSfixed64Arr',
+    'readSintArr',
+    'readString',
+    'readStringArr',
+    'readSubMsgArrDecoded',
+    'readSubMsgMerged',
+    'readTypedMap',
+    'readUint',
+    'readUint32Arr',
+    'readUintArr',
+    'readUintAuto',
+    'roundFloat32Shortest',
+    'spliceFields',
+    'validateMapTypes',
+    'validateValue',
+    'writeField0SchemaMeta',
+    'BinaryReadOptions',
+    'MarshalOptions',
+    'Message',
+    'MessageInitShape',
+    'MessageSchema',
+    'UnknownField',
+  ]);
+
+  const registerMessageExports = (exportName: string): void => {
+    localExportNames.add(exportName);
+    localExportNames.add(`${exportName}Schema`);
+    localExportNames.add(`create${exportName}`);
+    localExportNames.add(`encode${exportName}`);
+    localExportNames.add(`marshal${exportName}OmniBuf`);
+    localExportNames.add(`decode${exportName}`);
+    localExportNames.add(`unmarshal${exportName}OmniBuf`);
+    localExportNames.add(`Opaque${exportName}`);
+  };
 
   for (const en of file.enumType ?? []) {
     const enName = en.name ?? 'Enum';
@@ -1078,7 +1240,7 @@ export function generateFileCode(
     const info = registry.messages.get(fullProtoName);
     if (info) {
       localMessages.push(info);
-      localExportNames.add(info.exportName);
+      registerMessageExports(info.exportName);
     }
     for (const en of msg.enumType ?? []) {
       const enFull = `${fullProtoName}.${en.name ?? 'Enum'}`;
@@ -1100,6 +1262,12 @@ export function generateFileCode(
   // Track external imports by fileProtoName -> Map<originalExport, localAlias>
   const externalImports = new Map<string, Map<string, string>>();
 
+  const hasImportedMessageCollision = (candidate: string): boolean =>
+    localExportNames.has(candidate) ||
+    localExportNames.has(`${candidate}Schema`) ||
+    localExportNames.has(`encode${candidate}`) ||
+    localExportNames.has(`decode${candidate}`);
+
   const ensureImportedSymbol = (
     targetFile: string,
     exportName: string,
@@ -1118,12 +1286,18 @@ export function generateFileCode(
     if (existingAlias) return existingAlias;
 
     let alias = exportName;
-    if (localExportNames.has(alias)) {
+    if (isMessage ? hasImportedMessageCollision(alias) : localExportNames.has(alias)) {
       alias = fullProtoName.replace(/\./g, '_');
+    }
+    while (isMessage ? hasImportedMessageCollision(alias) : localExportNames.has(alias)) {
+      alias = `${alias}$`;
     }
     localExportNames.add(alias);
     fileImports.set(exportName, alias);
     if (isMessage) {
+      localExportNames.add(`${alias}Schema`);
+      localExportNames.add(`encode${alias}`);
+      localExportNames.add(`decode${alias}`);
       fileImports.set(`${exportName}Schema`, `${alias}Schema`);
       fileImports.set(`encode${exportName}`, `encode${alias}`);
       fileImports.set(`decode${exportName}`, `decode${alias}`);
@@ -1161,11 +1335,46 @@ export function generateFileCode(
     const fullProtoName = msgInfo.fullProtoName;
     const fields: ResolvedField[] = [];
     const oneofsMap = new Map<number, ResolvedOneof>();
+    const usedInterfaceProps = new Set<string>([
+      '$typeName',
+      '$unknown',
+      'constructor',
+      'toString',
+      'toJSON',
+      'valueOf',
+    ]);
+
+    // Pre-allocate real oneof group names first so fields cannot collide with their enclosing oneof property
+    for (let idx = 0; idx < (msg.oneofDecl ?? []).length; idx++) {
+      const decl = msg.oneofDecl![idx]!;
+      const isSyntheticOptional = (msg.field ?? []).some(
+        (fld) => fld.oneofIndex === idx && fld.proto3Optional,
+      );
+      if (isSyntheticOptional || !decl.name) continue;
+      const protoName = decl.name;
+      let localName = safeObjectProperty(protoCamelCase(protoName));
+      while (usedInterfaceProps.has(localName)) {
+        localName = `${localName}$`;
+      }
+      usedInterfaceProps.add(localName);
+      oneofsMap.set(idx, {
+        index: idx,
+        protoName,
+        localName,
+        emitProtoAlias: false,
+        fields: [],
+      });
+    }
 
     for (const f of msg.field ?? []) {
       const num = f.number ?? 0;
       const name = f.name ?? `field_${num}`;
-      const localName = safeObjectProperty(protoCamelCase(name));
+      let localName = safeObjectProperty(protoCamelCase(name));
+      while (usedInterfaceProps.has(localName)) {
+        localName = `${localName}$`;
+      }
+      usedInterfaceProps.add(localName);
+
       const type = parseFieldDescriptorType(f.type);
       const rep = isRepeated(f.label);
 
@@ -1174,12 +1383,10 @@ export function generateFileCode(
           ? resolveCandidateName(f.typeName, fullProtoName, pkg, registry.mapEntries)
           : undefined;
 
-      const hasRealOneof =
-        f.oneofIndex !== undefined && !f.proto3Optional && msg.oneofDecl?.[f.oneofIndex]?.name;
-      const oneofProtoName = hasRealOneof ? msg.oneofDecl![f.oneofIndex!]!.name! : undefined;
-      const oneofLocalName = oneofProtoName
-        ? safeObjectProperty(protoCamelCase(oneofProtoName))
-        : undefined;
+      const oneofGroup =
+        f.oneofIndex !== undefined && !f.proto3Optional ? oneofsMap.get(f.oneofIndex) : undefined;
+      const oneofProtoName = oneofGroup?.protoName;
+      const oneofLocalName = oneofGroup?.localName;
       const explicitPresence = !oneofLocalName && Boolean(f.proto3Optional);
 
       let rf: ResolvedField;
@@ -1188,7 +1395,12 @@ export function generateFileCode(
           number: num,
           name,
           localName,
+          emitNameAlias: false,
           pascalName: toPascalCase(name),
+          storageProp: '',
+          getterName: '',
+          setterName: '',
+          shorthandMethods: [],
           type,
           repeated: false,
           isMap: true,
@@ -1205,7 +1417,12 @@ export function generateFileCode(
           number: num,
           name,
           localName,
+          emitNameAlias: false,
           pascalName: toPascalCase(name),
+          storageProp: '',
+          getterName: '',
+          setterName: '',
+          shorthandMethods: [],
           type,
           repeated: rep,
           isMap: false,
@@ -1225,27 +1442,75 @@ export function generateFileCode(
         };
       }
 
-      if (hasRealOneof && oneofLocalName && oneofProtoName) {
-        let group = oneofsMap.get(f.oneofIndex!);
-        if (!group) {
-          group = {
-            index: f.oneofIndex!,
-            protoName: oneofProtoName,
-            localName: oneofLocalName,
-            fields: [],
-          };
-          oneofsMap.set(f.oneofIndex!, group);
-        }
-        group.fields.push(rf);
+      if (oneofGroup) {
+        oneofGroup.fields.push(rf);
       }
 
       fields.push(rf);
     }
 
     fields.sort((a, b) => a.number - b.number);
+
+    // Allocate optional snake_case aliases on the interface only if they don't collide
+    for (const oneof of oneofsMap.values()) {
+      if (oneof.protoName !== oneof.localName && !usedInterfaceProps.has(oneof.protoName)) {
+        oneof.emitProtoAlias = true;
+        usedInterfaceProps.add(oneof.protoName);
+      }
+    }
+    for (const f of fields) {
+      if (f.name !== f.localName && !usedInterfaceProps.has(f.name)) {
+        f.emitNameAlias = true;
+        usedInterfaceProps.add(f.name);
+      }
+    }
+
+    // Allocate Opaque<Message> member names (storage, getX/setX, and non-colliding shorthand methods)
+    const usedOpaqueMembers = new Set<string>([
+      'constructor',
+      '_raw',
+      '_dirtyMask',
+      'raw',
+      'marshal',
+      'toString',
+      'toJSON',
+      'valueOf',
+    ]);
+
+    for (const f of fields) {
+      let storageProp = `_${f.localName}`;
+      while (usedOpaqueMembers.has(storageProp)) {
+        storageProp = `${storageProp}$`;
+      }
+      usedOpaqueMembers.add(storageProp);
+      f.storageProp = storageProp;
+
+      let getterName = `get${f.pascalName}`;
+      let setterName = `set${f.pascalName}`;
+      while (usedOpaqueMembers.has(getterName) || usedOpaqueMembers.has(setterName)) {
+        getterName = `${getterName}$`;
+        setterName = `${setterName}$`;
+      }
+      usedOpaqueMembers.add(getterName);
+      usedOpaqueMembers.add(setterName);
+      f.getterName = getterName;
+      f.setterName = setterName;
+    }
+
+    for (const f of fields) {
+      if (!usedOpaqueMembers.has(f.localName)) {
+        usedOpaqueMembers.add(f.localName);
+        f.shorthandMethods.push(f.localName);
+      }
+      if (f.name !== f.localName && !usedOpaqueMembers.has(f.name)) {
+        usedOpaqueMembers.add(f.name);
+        f.shorthandMethods.push(f.name);
+      }
+    }
+
     resolvedByMessage.set(msgInfo.exportName, {
       fields,
-      oneofs: Array.from(oneofsMap.values()),
+      oneofs: Array.from(oneofsMap.values()).filter((o) => o.fields.length > 0),
     });
   }
 
@@ -1256,8 +1521,10 @@ export function generateFileCode(
   lines.push('import {');
   lines.push('  Encoder,');
   lines.push('  MaxNestingDepth,');
+  lines.push('  activeOneofSlice,');
   lines.push('  appendBoolArrBody,');
   lines.push('  appendBytesArrBody,');
+  lines.push('  appendEnumArrBody,');
   lines.push('  appendFloat32ArrBody,');
   lines.push('  appendFloat64ArrBody,');
   lines.push('  appendSintArrAutoBody,');
@@ -1279,6 +1546,8 @@ export function generateFileCode(
   lines.push('  readBoolArr,');
   lines.push('  readBytes,');
   lines.push('  readBytesArr,');
+  lines.push('  readEnum,');
+  lines.push('  readEnumArr,');
   lines.push('  readFixed32,');
   lines.push('  readFixed32Arr,');
   lines.push('  readFixed64Auto,');
@@ -1344,6 +1613,10 @@ export function generateFileCode(
     const msgName = msgInfo.exportName;
     const fullTypeName = msgInfo.fullProtoName;
     const { fields, oneofs } = resolvedByMessage.get(msgName)!;
+    const oneofByLocalName = new Map<string, ResolvedOneof>();
+    for (const oneof of oneofs) {
+      oneofByLocalName.set(oneof.localName, oneof);
+    }
     const maxField = fields.reduce((acc, f) => Math.max(acc, f.number), 0);
 
     // 1. Interface (extending protobuf-es Message<FullTypeName>)
@@ -1355,20 +1628,20 @@ export function generateFileCode(
       );
       variants.push('{ case: undefined; value?: undefined }');
       lines.push(`  ${oneof.localName}: ${variants.join(' | ')};`);
-      if (oneof.protoName !== oneof.localName) {
+      if (oneof.emitProtoAlias) {
         lines.push(`  ${oneof.protoName}?: ${variants.join(' | ')};`);
       }
     }
     for (const f of fields) {
       if (f.oneofLocalName) {
         lines.push(`  ${f.localName}?: ${tsTypeForField(f)};`);
-        if (f.localName !== f.name) {
+        if (f.emitNameAlias) {
           lines.push(`  ${f.name}?: ${tsTypeForField(f)};`);
         }
       } else {
         const optMod = f.explicitPresence ? '?' : '';
         lines.push(`  ${f.localName}${optMod}: ${tsTypeForField(f)};`);
-        if (f.localName !== f.name) {
+        if (f.emitNameAlias) {
           lines.push(`  ${f.name}?: ${tsTypeForField(f)};`);
         }
       }
@@ -1552,7 +1825,7 @@ export function generateFileCode(
     lines.push('  private _raw: Uint8Array;');
     lines.push(`  private _dirtyMask = ${zeroMask};`);
     for (const f of fields) {
-      lines.push(`  private _${f.localName}?: ${tsTypeForField(f)};`);
+      lines.push(`  private ${f.storageProp}?: ${tsTypeForField(f)};`);
     }
     lines.push('');
     lines.push('  constructor(raw: Uint8Array) {');
@@ -1566,29 +1839,38 @@ export function generateFileCode(
 
     for (const f of fields) {
       const bit = use32Mask ? `1 << ${f.number}` : `1n << ${f.number}n`;
-      lines.push(`  ${f.localName}(): ${tsTypeForField(f)} {`);
+      const oneofGroup = f.oneofLocalName ? oneofByLocalName.get(f.oneofLocalName) : undefined;
+      const dirtyMaskExpr = oneofGroup
+        ? oneofGroup.fields
+            .map((of) => (use32Mask ? `(1 << ${of.number})` : `(1n << ${of.number}n)`))
+            .join(' | ')
+        : bit;
+
+      lines.push(`  ${f.getterName}(): ${tsTypeForField(f)} {`);
       lines.push(`    if ((this._dirtyMask & (${bit})) !== ${zeroMask}) {`);
-      lines.push(`      return this._${f.localName}!;`);
+      lines.push(`      return this.${f.storageProp}!;`);
       lines.push('    }');
-      lines.push(`    ${emitOpaqueGetterBody(f)}`);
+      lines.push(`    ${emitOpaqueGetterBody(f, oneofGroup)}`);
       lines.push('  }');
       lines.push('');
 
-      lines.push(`  get${f.pascalName}(): ${tsTypeForField(f)} {`);
-      lines.push(`    return this.${f.localName}();`);
-      lines.push('  }');
-      lines.push('');
-
-      if (f.name !== f.localName) {
-        lines.push(`  ${f.name}(): ${tsTypeForField(f)} {`);
-        lines.push(`    return this.${f.localName}();`);
+      for (const shorthand of f.shorthandMethods) {
+        lines.push(`  ${shorthand}(): ${tsTypeForField(f)} {`);
+        lines.push(`    return this.${f.getterName}();`);
         lines.push('  }');
         lines.push('');
       }
 
-      lines.push(`  set${f.pascalName}(val: ${tsTypeForField(f)}): void {`);
-      lines.push(`    this._${f.localName} = val;`);
-      lines.push(`    this._dirtyMask |= (${bit});`);
+      lines.push(`  ${f.setterName}(val: ${tsTypeForField(f)}): void {`);
+      if (oneofGroup) {
+        for (const ofld of oneofGroup.fields) {
+          if (ofld.number !== f.number) {
+            lines.push(`    this.${ofld.storageProp} = undefined;`);
+          }
+        }
+      }
+      lines.push(`    this.${f.storageProp} = val;`);
+      lines.push(`    this._dirtyMask |= (${dirtyMaskExpr});`);
       lines.push('  }');
       lines.push('');
     }
@@ -1604,7 +1886,7 @@ export function generateFileCode(
     for (const f of fields) {
       lines.push(`        case ${f.number}: {`);
       lines.push(
-        `          const msg = { ${f.localName}: this._${f.localName}! } as Partial<${msgName}>;`,
+        `          const msg = { ${f.localName}: this.${f.storageProp}! } as Partial<${msgName}>;`,
       );
       lines.push(emitEncodeField(f, 'msg', '          '));
       lines.push('          break;');

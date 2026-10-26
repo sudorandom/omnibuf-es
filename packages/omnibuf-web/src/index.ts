@@ -254,6 +254,85 @@ export function createOmniBufEncodeStream(): TransformStream<Uint8Array, Uint8Ar
 }
 
 /**
+ * Linear-time chunk queue for length-prefixed frame decoding in Web Streams.
+ */
+class WebFrameBufferQueue {
+  private chunks: Uint8Array[] = [];
+  private headIndex = 0;
+  private headOffset = 0;
+  public totalBytes = 0;
+  public pendingFrameLen: number | null = null;
+
+  push(chunk: Uint8Array): void {
+    if (chunk.byteLength === 0) return;
+    this.chunks.push(chunk);
+    this.totalBytes += chunk.byteLength;
+  }
+
+  peekUInt32LE(): number {
+    const first = this.chunks[this.headIndex]!;
+    if (first.byteLength - this.headOffset >= 4) {
+      const o = this.headOffset;
+      return (
+        (first[o]! | (first[o + 1]! << 8) | (first[o + 2]! << 16) | (first[o + 3]! << 24)) >>> 0
+      );
+    }
+    let b0 = 0;
+    let b1 = 0;
+    let b2 = 0;
+    let b3 = 0;
+    let idx = this.headIndex;
+    let off = this.headOffset;
+    for (let i = 0; i < 4; i++) {
+      let c = this.chunks[idx]!;
+      while (off >= c.byteLength) {
+        idx++;
+        off = 0;
+        c = this.chunks[idx]!;
+      }
+      const byte = c[off++]!;
+      if (i === 0) b0 = byte;
+      else if (i === 1) b1 = byte;
+      else if (i === 2) b2 = byte;
+      else b3 = byte;
+    }
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) >>> 0;
+  }
+
+  consume(len: number, dst?: Uint8Array): void {
+    let remaining = len;
+    let dstOffset = 0;
+    while (remaining > 0) {
+      const chunk = this.chunks[this.headIndex]!;
+      const avail = chunk.byteLength - this.headOffset;
+      const take = remaining < avail ? remaining : avail;
+      if (dst) {
+        dst.set(chunk.subarray(this.headOffset, this.headOffset + take), dstOffset);
+        dstOffset += take;
+      }
+      this.headOffset += take;
+      this.totalBytes -= take;
+      remaining -= take;
+      if (this.headOffset === chunk.byteLength) {
+        this.headIndex++;
+        this.headOffset = 0;
+      }
+    }
+    if (this.headIndex === this.chunks.length) {
+      this.chunks.length = 0;
+      this.headIndex = 0;
+    } else if (this.headIndex > 1024 && this.headIndex * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.headIndex);
+      this.headIndex = 0;
+    }
+  }
+
+  get trailingBytes(): number {
+    return (this.pendingFrameLen !== null ? 4 : 0) + this.totalBytes;
+  }
+}
+
+/**
  * Create a Web Streams `TransformStream<Uint8Array, Uint8Array>` that deframes
  * 4-byte little-endian length-prefixed chunks into complete OmniBuf `Uint8Array` packets.
  */
@@ -261,54 +340,43 @@ export function createOmniBufDecodeStream(options?: {
   maxFrameBytes?: number;
 }): TransformStream<Uint8Array, Uint8Array> {
   const maxFrameBytes = options?.maxFrameBytes ?? 16 * 1024 * 1024;
-  let buffer: Uint8Array = new Uint8Array(0);
+  const queue = new WebFrameBufferQueue();
 
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       if (chunk.byteLength === 0) return;
-      if (buffer.byteLength === 0) {
-        buffer = new Uint8Array(chunk.byteLength);
-        buffer.set(chunk);
-      } else {
-        const merged = new Uint8Array(buffer.byteLength + chunk.byteLength);
-        merged.set(buffer, 0);
-        merged.set(chunk, buffer.byteLength);
-        buffer = merged;
-      }
+      queue.push(chunk);
 
-      let offset = 0;
-      while (buffer.byteLength - offset >= 4) {
-        const frameLen =
-          (buffer[offset]! |
-            (buffer[offset + 1]! << 8) |
-            (buffer[offset + 2]! << 16) |
-            (buffer[offset + 3]! << 24)) >>>
-          0;
-        if (frameLen > maxFrameBytes) {
-          controller.error(
-            new Error(
-              `omnibuf/web: frame length ${frameLen} exceeds maxFrameBytes ${maxFrameBytes}`,
-            ),
-          );
-          return;
+      while (true) {
+        if (queue.pendingFrameLen === null) {
+          if (queue.totalBytes < 4) break;
+          const frameLen = queue.peekUInt32LE();
+          if (frameLen > maxFrameBytes) {
+            controller.error(
+              new Error(
+                `omnibuf/web: frame length ${frameLen} exceeds maxFrameBytes ${maxFrameBytes}`,
+              ),
+            );
+            return;
+          }
+          queue.consume(4);
+          queue.pendingFrameLen = frameLen;
         }
-        if (buffer.byteLength - offset - 4 < frameLen) {
+        if (queue.totalBytes < queue.pendingFrameLen) {
           break;
         }
-        const packet = buffer.slice(offset + 4, offset + 4 + frameLen);
+        const frameLen = queue.pendingFrameLen;
+        queue.pendingFrameLen = null;
+        const packet = new Uint8Array(frameLen);
+        queue.consume(frameLen, packet);
         controller.enqueue(packet);
-        offset += 4 + frameLen;
-      }
-
-      if (offset > 0) {
-        buffer = buffer.slice(offset);
       }
     },
     flush(controller) {
-      if (buffer.byteLength > 0) {
+      if (queue.trailingBytes > 0) {
         controller.error(
           new Error(
-            `omnibuf/web: truncated frame at end of stream (${buffer.byteLength} trailing bytes)`,
+            `omnibuf/web: truncated frame at end of stream (${queue.trailingBytes} trailing bytes)`,
           ),
         );
       }

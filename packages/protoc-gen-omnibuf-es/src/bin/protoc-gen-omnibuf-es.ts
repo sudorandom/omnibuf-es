@@ -111,10 +111,11 @@ async function main(): Promise<void> {
   }
 
   const fds = parseBinaryFileDescriptorSet(combinedFdsBytes);
+  const allFiles = fds.file ?? [];
   const generated = [];
-  for (const file of fds.file ?? []) {
+  for (const file of allFiles) {
     if (filesToGenerate.size === 0 || (file.name && filesToGenerate.has(file.name))) {
-      generated.push(generateFileCode(file));
+      generated.push(generateFileCode(file, allFiles));
     }
   }
 
