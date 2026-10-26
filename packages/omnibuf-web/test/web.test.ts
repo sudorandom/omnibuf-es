@@ -66,6 +66,8 @@ describe('@omnibuf/web - Browser codecs, Binary Helpers, Web Streams, and Packet
     // Hex
     const hex = toHex(pkt);
     expect(fromHex(hex)).toEqual(pkt);
+    assert.throws(() => fromHex('0g'), /invalid hex byte/);
+    assert.throws(() => fromHex('-1'), /invalid hex byte/);
 
     // Base64
     const b64 = toBase64(pkt);

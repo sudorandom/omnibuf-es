@@ -685,30 +685,33 @@ export class MessageSchema<
     if (init !== undefined && isMessage(init, this)) {
       return init as T;
     }
-    const obj: any = this.generatedHooks?.create
-      ? this.generatedHooks.create()
+    const hasGenCreate = Boolean(this.generatedHooks?.create);
+    const obj: any = hasGenCreate
+      ? this.generatedHooks!.create!()
       : this.factory
         ? this.factory()
         : {};
-    this.ensureAccessors(obj);
+    if (!hasGenCreate) {
+      this.ensureAccessors(obj);
 
-    let nextCreating: Set<MessageSchema<any>> | undefined;
-    if (this.isCyclicOrDeep()) {
-      nextCreating = new Set(creatingAncestors);
-      nextCreating.add(this);
-    }
-
-    for (let i = 0; i < this.fields.length; i++) {
-      const f = this.fields[i]!;
-      if (f.oneof) continue;
-      if (f.explicitPresence) {
-        if (!(f.propKey in obj)) {
-          obj[f.propKey] = undefined;
-        }
-        continue;
+      let nextCreating: Set<MessageSchema<any>> | undefined;
+      if (this.isCyclicOrDeep()) {
+        nextCreating = new Set(creatingAncestors);
+        nextCreating.add(this);
       }
-      if (obj[f.propKey] === undefined) {
-        obj[f.propKey] = defaultFieldValue(f, nextCreating);
+
+      for (let i = 0; i < this.fields.length; i++) {
+        const f = this.fields[i]!;
+        if (f.oneof) continue;
+        if (f.explicitPresence) {
+          if (!(f.propKey in obj)) {
+            obj[f.propKey] = undefined;
+          }
+          continue;
+        }
+        if (obj[f.propKey] === undefined) {
+          obj[f.propKey] = defaultFieldValue(f, nextCreating);
+        }
       }
     }
 

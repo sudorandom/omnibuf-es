@@ -22,6 +22,7 @@ import {
   decodeVarintBigInt,
   decodeZigZagAuto,
   encodeField0SchemaMeta,
+  fastDecodeShortASCII,
   float32FromBits,
   float64FromBits,
   nextContainerField,
@@ -49,6 +50,8 @@ export const BrowserStringCodec: StringCodec = {
   },
   decode(bytes: Uint8Array, start = 0, end = bytes.length): string {
     if (end <= start) return '';
+    const ascii = fastDecodeShortASCII(bytes, start, end);
+    if (ascii !== null) return ascii;
     return browserDecoder.decode(bytes.subarray(start, end));
   },
   byteLength(str: string): number {
@@ -195,11 +198,11 @@ export function fromHex(hex: string): Uint8Array {
   }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
-    const byte = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(byte)) {
+    const pair = clean.slice(i * 2, i * 2 + 2);
+    if (!/^[0-9a-fA-F]{2}$/.test(pair)) {
       throw new Error(`omnibuf/web: invalid hex byte at index ${i * 2}`);
     }
-    out[i] = byte;
+    out[i] = parseInt(pair, 16);
   }
   return out;
 }
