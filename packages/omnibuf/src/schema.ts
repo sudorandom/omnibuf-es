@@ -11,7 +11,7 @@ import {
   mergeSchemaMeta,
   writeField0SchemaMeta,
 } from './blind.js';
-import { Encoder, mapHeaderByte } from './encoder.js';
+import { Encoder } from './encoder.js';
 import {
   appendBoolArrBody,
   appendBytesArrBody,
@@ -26,21 +26,21 @@ import {
 } from './readers.js';
 import {
   MaxNestingDepth,
+  WireArray,
   WireBoolFalse,
   WireBoolTrue,
   WireBytes,
   WireFixed32,
   WireFixed64,
-  WireFixedArr,
+  WireFloat32,
+  WireFloat64,
   WireMap,
+  WireSfixed32,
+  WireSfixed64,
   WireSint,
-  WireSintArr,
   WireString,
-  WireStringArr,
   WireSubMsg,
-  WireSubMsgArr,
   WireUint,
-  WireUintArr,
   decodeUTF8,
   decodeVarint,
   decodeVarintAuto,
@@ -52,6 +52,7 @@ import {
   encodeZigZagNumber,
   float32FromBits,
   float64FromBits,
+  parseArrayHeader,
   readFloat64At,
   readLenSlice,
   roundFloat32Shortest,
@@ -220,7 +221,19 @@ export type ArrayFieldType =
 export type FieldType = ScalarFieldType | ArrayFieldType | 'submsg' | 'map';
 
 export type WireOverride =
-  'uint' | 'sint' | 'fixed32' | 'fixed64' | 'string' | 'bytes' | 'bool' | 'submsg' | 'map';
+  | 'uint'
+  | 'sint'
+  | 'fixed32'
+  | 'fixed64'
+  | 'sfixed32'
+  | 'sfixed64'
+  | 'float32'
+  | 'float64'
+  | 'string'
+  | 'bytes'
+  | 'bool'
+  | 'submsg'
+  | 'map';
 
 export interface FieldSpec {
   /** Field number (1..4294967295). */
@@ -318,9 +331,25 @@ function resolveEffectiveType(type: FieldType, wire?: WireOverride): FieldType {
           ? 'sint64[]'
           : 'sint32[]';
       case 'fixed32':
-        return type === 'float32[]' ? 'float32[]' : 'fixed32[]';
+        return type === 'float32[]'
+          ? 'float32[]'
+          : type === 'int32[]' || type === 'sint32[]' || type === 'sfixed32[]'
+            ? 'sfixed32[]'
+            : 'fixed32[]';
+      case 'sfixed32':
+        return 'sfixed32[]';
+      case 'float32':
+        return 'float32[]';
       case 'fixed64':
-        return type === 'float64[]' ? 'float64[]' : 'fixed64[]';
+        return type === 'float64[]'
+          ? 'float64[]'
+          : type === 'int64[]' || type === 'sint64[]' || type === 'sfixed64[]'
+            ? 'sfixed64[]'
+            : 'fixed64[]';
+      case 'sfixed64':
+        return 'sfixed64[]';
+      case 'float64':
+        return 'float64[]';
       case 'string':
         return 'string[]';
       case 'bytes':
@@ -335,9 +364,25 @@ function resolveEffectiveType(type: FieldType, wire?: WireOverride): FieldType {
     case 'sint':
       return type === 'uint64' || type === 'int64' || type === 'sint64' ? 'sint64' : 'sint32';
     case 'fixed32':
-      return type === 'float32' ? 'float32' : 'fixed32';
+      return type === 'float32'
+        ? 'float32'
+        : type === 'int32' || type === 'sint32' || type === 'sfixed32'
+          ? 'sfixed32'
+          : 'fixed32';
+    case 'sfixed32':
+      return 'sfixed32';
+    case 'float32':
+      return 'float32';
     case 'fixed64':
-      return type === 'float64' ? 'float64' : 'fixed64';
+      return type === 'float64'
+        ? 'float64'
+        : type === 'int64' || type === 'sint64' || type === 'sfixed64'
+          ? 'sfixed64'
+          : 'fixed64';
+    case 'sfixed64':
+      return 'sfixed64';
+    case 'float64':
+      return 'float64';
     case 'string':
       return 'string';
     case 'bytes':
@@ -351,12 +396,12 @@ function wireTypeForEffectiveType(t: FieldType): number {
   switch (t) {
     case 'uint32':
     case 'uint64':
-    case 'enum':
       return WireUint;
     case 'sint32':
     case 'sint64':
     case 'int32':
     case 'int64':
+    case 'enum':
       return WireSint;
     case 'bool':
       return WireBoolTrue;
@@ -366,36 +411,36 @@ function wireTypeForEffectiveType(t: FieldType): number {
       return WireBytes;
     case 'submsg':
       return WireSubMsg;
-    case 'float32':
     case 'fixed32':
-    case 'sfixed32':
       return WireFixed32;
-    case 'float64':
+    case 'sfixed32':
+      return WireSfixed32;
+    case 'float32':
+      return WireFloat32;
     case 'fixed64':
-    case 'sfixed64':
       return WireFixed64;
+    case 'sfixed64':
+      return WireSfixed64;
+    case 'float64':
+      return WireFloat64;
     case 'string[]':
     case 'bytes[]':
-      return WireStringArr;
     case 'uint32[]':
     case 'uint64[]':
     case 'enum[]':
     case 'bool[]':
-      return WireUintArr;
     case 'sint32[]':
     case 'sint64[]':
     case 'int32[]':
     case 'int64[]':
-      return WireSintArr;
     case 'float32[]':
     case 'float64[]':
     case 'fixed32[]':
     case 'fixed64[]':
     case 'sfixed32[]':
     case 'sfixed64[]':
-      return WireFixedArr;
     case 'submsg[]':
-      return WireSubMsgArr;
+      return WireArray;
     case 'map':
       return WireMap;
   }
@@ -403,6 +448,7 @@ function wireTypeForEffectiveType(t: FieldType): number {
 
 function scalarWireType(t: ScalarFieldType | 'submsg'): number {
   if (t === 'submsg') return WireSubMsg;
+  if (t === 'bool') return WireBoolFalse;
   return wireTypeForEffectiveType(t);
 }
 
@@ -461,9 +507,9 @@ export class MessageSchema<
     const oneofMap = new Map<string, CompiledOneof>();
 
     for (const [propKey, spec] of Object.entries(specs)) {
-      if (!Number.isInteger(spec.fieldNum) || spec.fieldNum < 1 || spec.fieldNum > 0xffffffff) {
+      if (!Number.isInteger(spec.fieldNum) || spec.fieldNum < 1 || spec.fieldNum > 536870911) {
         throw new Error(
-          `omnibuf: field number ${spec.fieldNum} on ${typeName}.${propKey} out of range (1..4294967295)`,
+          `omnibuf: field number ${spec.fieldNum} on ${typeName}.${propKey} out of range (1..536870911)`,
         );
       }
       if (this.byNum.has(spec.fieldNum)) {
@@ -511,8 +557,8 @@ export class MessageSchema<
         const mv = spec.mapVal ?? (spec as any).mapValType ?? 'uint64';
         cf.mapKeyType = mk;
         cf.mapValType = mv;
-        cf.mapKeyWT = mk === 'bool' ? WireUint : scalarWireType(mk);
-        cf.mapValWT = mv === 'bool' ? WireUint : scalarWireType(mv);
+        cf.mapKeyWT = scalarWireType(mk);
+        cf.mapValWT = scalarWireType(mv);
         validateMapTypes(cf.mapKeyWT, cf.mapValWT);
       }
 
@@ -1206,7 +1252,7 @@ export class MessageSchema<
         pos += 2;
       } else {
         const [t64, tn] = decodeVarintBigInt(data, pos);
-        if (tn === 0 || t64 >> 4n > 0xffffffffn) {
+        if (tn === 0 || t64 >> 4n > 536870911n) {
           throw new Error(`omnibuf: truncated or invalid multi-byte tag at ${pos}`);
         }
         tag = Number(t64);
@@ -1594,7 +1640,6 @@ function encodeFieldValue(
   const fnum = f.fieldNum;
   switch (f.effectiveType) {
     case 'uint32':
-    case 'enum':
       enc.writeUint(fnum, Number(rawVal ?? 0) >>> 0);
       break;
     case 'uint64': {
@@ -1607,6 +1652,7 @@ function encodeFieldValue(
     }
     case 'sint32':
     case 'int32':
+    case 'enum':
       enc.writeInt(fnum, Number(rawVal ?? 0) | 0);
       break;
     case 'sint64':
@@ -1633,15 +1679,19 @@ function encodeFieldValue(
       enc.writeFloat32(fnum, Number(rawVal ?? 0));
       break;
     case 'fixed32':
-    case 'sfixed32':
       enc.writeFixed32(fnum, Number(rawVal ?? 0) >>> 0);
+      break;
+    case 'sfixed32':
+      enc.writeSfixed32(fnum, Number(rawVal ?? 0) | 0);
       break;
     case 'float64':
       enc.writeFloat64(fnum, Number(rawVal ?? 0));
       break;
     case 'fixed64':
-    case 'sfixed64':
       enc.writeFixed64(fnum, rawVal ?? 0);
+      break;
+    case 'sfixed64':
+      enc.writeSfixed64(fnum, rawVal ?? 0);
       break;
     case 'string[]':
       enc.writeStringArr(fnum, Array.isArray(rawVal) ? rawVal : []);
@@ -1653,7 +1703,6 @@ function encodeFieldValue(
       enc.writeBoolArr(fnum, Array.isArray(rawVal) ? rawVal : []);
       break;
     case 'uint32[]':
-    case 'enum[]':
       enc.writeUint32Arr(fnum, rawVal ?? []);
       break;
     case 'uint64[]':
@@ -1661,6 +1710,7 @@ function encodeFieldValue(
       break;
     case 'sint32[]':
     case 'int32[]':
+    case 'enum[]':
     case 'sint64[]':
     case 'int64[]':
       enc.writeSintArr(fnum, rawVal ?? []);
@@ -1669,15 +1719,19 @@ function encodeFieldValue(
       enc.writeFloat32Arr(fnum, rawVal ?? []);
       break;
     case 'fixed32[]':
-    case 'sfixed32[]':
       enc.writeFixed32Arr(fnum, rawVal ?? []);
+      break;
+    case 'sfixed32[]':
+      enc.writeSfixed32Arr(fnum, rawVal ?? []);
       break;
     case 'float64[]':
       enc.writeFloat64Arr(fnum, rawVal ?? []);
       break;
     case 'fixed64[]':
-    case 'sfixed64[]':
       enc.writeFixed64Arr(fnum, rawVal ?? []);
+      break;
+    case 'sfixed64[]':
+      enc.writeSfixed64Arr(fnum, rawVal ?? []);
       break;
     case 'submsg[]': {
       const subSchema = f.resolveSubSchema?.();
@@ -1716,7 +1770,6 @@ function encodeMapScalarEntry(enc: Encoder, t: ScalarFieldType, val: any): void 
       );
       break;
     case 'uint32':
-    case 'enum':
       enc.writeRawVarint(Number(val ?? 0) >>> 0);
       break;
     case 'uint64': {
@@ -1733,6 +1786,7 @@ function encodeMapScalarEntry(enc: Encoder, t: ScalarFieldType, val: any): void 
     }
     case 'sint32':
     case 'int32':
+    case 'enum':
       enc.writeRawVarint(encodeZigZagNumber(Number(val ?? 0) | 0));
       break;
     case 'sint64':
@@ -1761,7 +1815,7 @@ function encodeMapScalarEntry(enc: Encoder, t: ScalarFieldType, val: any): void 
     }
     case 'bool': {
       const b = val === true || val === 'true' || val === 1;
-      enc.writeRawVarint(b ? 1 : 0);
+      enc.writeByte(b ? 1 : 0);
       break;
     }
   }
@@ -1809,7 +1863,8 @@ function encodeMapField(
 
   enc.writeTag(f.fieldNum, WireMap);
   enc.beginContainer();
-  enc.writeByte(mapHeaderByte(keyWT, valWT));
+  enc.writeByte(keyWT);
+  enc.writeByte(valWT);
   enc.writeRawVarint(entries.length);
 
   if (deterministic && entries.length > 1) {
@@ -1858,18 +1913,6 @@ function decodeCompiledFieldValue(
       out[key] = Number(v & 0xffffffffn) >>> 0;
       return pos + vn;
     }
-    case 'enum': {
-      if (pos < n && (data[pos]! & 7) !== 0) {
-        const [v, vn] = decodeVarint(data, pos);
-        if (vn === 0) throw new Error(`omnibuf: truncated enum at ${pos}`);
-        out[key] = v | 0;
-        return pos + vn;
-      }
-      const [v, vn] = decodeVarintBigInt(data, pos);
-      if (vn === 0) throw new Error(`omnibuf: truncated enum at ${pos}`);
-      out[key] = Number(v & 0xffffffffn) | 0;
-      return pos + vn;
-    }
     case 'uint64': {
       const [v, vn] = f.useBigInt ? decodeVarintBigInt(data, pos) : decodeVarintAuto(data, pos);
       if (vn === 0) throw new Error(`omnibuf: truncated uint64 at ${pos}`);
@@ -1877,7 +1920,8 @@ function decodeCompiledFieldValue(
       return pos + vn;
     }
     case 'sint32':
-    case 'int32': {
+    case 'int32':
+    case 'enum': {
       if (pos < n && (data[pos]! & 7) !== 0) {
         const [v, vn] = decodeVarint(data, pos);
         if (vn === 0) throw new Error(`omnibuf: truncated int32 at ${pos}`);
@@ -1911,7 +1955,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'float32': {
-      if (n - pos < 4) throw new Error(`omnibuf: truncated fixed32 at ${pos}`);
+      if (n - pos < 4) throw new Error(`omnibuf: truncated float32 at ${pos}`);
       const bits =
         (data[pos]! | (data[pos + 1]! << 8) | (data[pos + 2]! << 16) | (data[pos + 3]! << 24)) >>>
         0;
@@ -1934,7 +1978,7 @@ function decodeCompiledFieldValue(
       return pos + 4;
     }
     case 'float64': {
-      if (n - pos < 8) throw new Error(`omnibuf: truncated fixed64 at ${pos}`);
+      if (n - pos < 8) throw new Error(`omnibuf: truncated float64 at ${pos}`);
       out[key] = readFloat64At(data, pos);
       return pos + 8;
     }
@@ -1959,7 +2003,7 @@ function decodeCompiledFieldValue(
       return pos + 8;
     }
     case 'string[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: string[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendStringArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid string array at ${pos}`);
@@ -1967,7 +2011,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'bytes[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: Uint8Array[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendBytesArrBody(prev, body, false);
       if (!ok) throw new Error(`omnibuf: invalid bytes array at ${pos}`);
@@ -1975,7 +2019,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'bool[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: boolean[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendBoolArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid bool array at ${pos}`);
@@ -1983,7 +2027,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'uint32[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendUint32ArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid uint32 array at ${pos}`);
@@ -1991,7 +2035,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'enum[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendEnumArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid enum array at ${pos}`);
@@ -1999,7 +2043,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'uint64[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: (number | bigint)[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendUintArrAutoBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid uint64 array at ${pos}`);
@@ -2010,7 +2054,7 @@ function decodeCompiledFieldValue(
     case 'int32[]':
     case 'sint64[]':
     case 'int64[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: (number | bigint)[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendSintArrAutoBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid sint array at ${pos}`);
@@ -2019,7 +2063,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'float32[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendFloat32ArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid float32 array at ${pos}`);
@@ -2027,14 +2071,14 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'fixed32[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
-      if (body.length < 1 || body[0] !== WireFixed32 || (body.length - 1) % 4 !== 0) {
+      const [body, nextPos] = readLenSlice(data, pos, 2);
+      const [elemType, c, startP, ok] = parseArrayHeader(body);
+      if (!ok || elemType !== WireFixed32 || body.length - startP !== c * 4) {
         throw new Error(`omnibuf: invalid fixed32 array at ${pos}`);
       }
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
-      const c = (body.length - 1) / 4;
       for (let i = 0; i < c; i++) {
-        const off = 1 + i * 4;
+        const off = startP + i * 4;
         prev.push(
           (body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24)) >>>
             0,
@@ -2044,14 +2088,14 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'sfixed32[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
-      if (body.length < 1 || body[0] !== WireFixed32 || (body.length - 1) % 4 !== 0) {
+      const [body, nextPos] = readLenSlice(data, pos, 2);
+      const [elemType, c, startP, ok] = parseArrayHeader(body);
+      if (!ok || elemType !== WireSfixed32 || body.length - startP !== c * 4) {
         throw new Error(`omnibuf: invalid sfixed32 array at ${pos}`);
       }
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
-      const c = (body.length - 1) / 4;
       for (let i = 0; i < c; i++) {
-        const off = 1 + i * 4;
+        const off = startP + i * 4;
         prev.push(
           body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24) | 0,
         );
@@ -2060,7 +2104,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'float64[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
+      const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
       const [arr, ok] = appendFloat64ArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid float64 array at ${pos}`);
@@ -2069,15 +2113,16 @@ function decodeCompiledFieldValue(
     }
     case 'fixed64[]':
     case 'sfixed64[]': {
-      const [body, nextPos] = readLenSlice(data, pos, 1);
-      if (body.length < 1 || body[0] !== WireFixed64 || (body.length - 1) % 8 !== 0) {
+      const [body, nextPos] = readLenSlice(data, pos, 2);
+      const isSigned = f.effectiveType === 'sfixed64[]';
+      const expElemType = isSigned ? WireSfixed64 : WireFixed64;
+      const [elemType, c, startP, ok] = parseArrayHeader(body);
+      if (!ok || elemType !== expElemType || body.length - startP !== c * 8) {
         throw new Error(`omnibuf: invalid fixed64 array at ${pos}`);
       }
       const prev: (number | bigint)[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
-      const c = (body.length - 1) / 8;
-      const isSigned = f.effectiveType === 'sfixed64[]';
       for (let i = 0; i < c; i++) {
-        const off = 1 + i * 8;
+        const off = startP + i * 8;
         let u64 = 0n;
         for (let b = 7; b >= 0; b--) {
           u64 = (u64 << 8n) | BigInt(body[off + b]!);
@@ -2113,7 +2158,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'submsg[]': {
-      const [arrPayload, nextPos] = readLenSlice(data, pos, 0);
+      const [arrPayload, nextPos] = readLenSlice(data, pos, 2);
       const [elemCount, ok] = countSubMsgArrElems(arrPayload);
       if (!ok) {
         throw new Error(`omnibuf: corrupt submsg array at ${pos}`);
@@ -2123,7 +2168,7 @@ function decodeCompiledFieldValue(
         throw new Error(`omnibuf: missing subSchema on ${key}`);
       }
       const elems: any[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
-      let p = 0;
+      let [, , p] = parseArrayHeader(arrPayload);
       for (let i = 0; i < elemCount; i++) {
         const [el, en] = decodeVarintBigInt(arrPayload, p);
         p += en;
@@ -2141,7 +2186,7 @@ function decodeCompiledFieldValue(
       return nextPos;
     }
     case 'map': {
-      const [body, nextPos] = readLenSlice(data, pos, 2);
+      const [body, nextPos] = readLenSlice(data, pos, 3);
       decodeMapFieldBody(f, out, body, alreadySeen, depth, options);
       return nextPos;
     }
@@ -2175,25 +2220,31 @@ function decodeMapScalarEntry(
       if (vn === 0) throw new Error(`omnibuf: truncated WireMap sint at ${p}`);
       return [decodeZigZagAuto(v), p + vn];
     }
-    case WireFixed32: {
+    case WireFixed32:
+    case WireSfixed32:
+    case WireFloat32: {
       if (body.length - p < 4) {
-        throw new Error(`omnibuf: truncated WireMap fixed32 at ${p}`);
+        throw new Error(`omnibuf: truncated WireMap 32-bit entry at ${p}`);
       }
       const bits =
         (body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 0;
       return [bits, p + 4];
     }
-    case WireFixed64: {
+    case WireFixed64:
+    case WireSfixed64:
+    case WireFloat64: {
       if (body.length - p < 8) {
-        throw new Error(`omnibuf: truncated WireMap fixed64 at ${p}`);
+        throw new Error(`omnibuf: truncated WireMap 64-bit entry at ${p}`);
       }
       let u64 = 0n;
       for (let b = 7; b >= 0; b--) {
         u64 = (u64 << 8n) | BigInt(body[p + b]!);
       }
+      if (wt === WireFloat64) {
+        return [u64, p + 8];
+      }
       return [u64 <= 9007199254740991n ? Number(u64) : u64, p + 8];
     }
-    case WireBoolTrue:
     case WireBoolFalse: {
       if (body.length - p < 1) {
         throw new Error(`omnibuf: truncated WireMap bool at ${p}`);
@@ -2225,14 +2276,15 @@ function decodeMapFieldBody(
   depth: number,
   options?: BinaryReadOptions,
 ): void {
-  const expHeader = mapHeaderByte(f.mapKeyWT ?? WireString, f.mapValWT ?? WireUint);
-  if (body.length < 2 || body[0] !== expHeader) {
+  const expKeyWT = f.mapKeyWT ?? WireString;
+  const expValWT = f.mapValWT ?? WireUint;
+  if (body.length < 3 || body[0] !== expKeyWT || body[1] !== expValWT) {
     throw new Error(
-      `omnibuf: WireMap header mismatch (got 0x${body[0]?.toString(16)}, want 0x${expHeader.toString(16)})`,
+      `omnibuf: WireMap header mismatch (got ${body[0]}/${body[1]}, want ${expKeyWT}/${expValWT})`,
     );
   }
-  const [count, cn] = decodeVarintBigInt(body, 1);
-  if (cn === 0 || count * 2n > BigInt(body.length - (1 + cn))) {
+  const [count, cn] = decodeVarintBigInt(body, 2);
+  if (cn === 0 || count > BigInt(Math.floor((body.length - (2 + cn)) / 2))) {
     throw new Error(`omnibuf: invalid WireMap count ${count}`);
   }
   const subSchema = f.resolveSubSchema?.();
@@ -2255,7 +2307,7 @@ function decodeMapFieldBody(
       f.mapValType === 'fixed64' ||
       f.mapValType === 'sfixed64');
 
-  let p = 1 + cn;
+  let p = 2 + cn;
   const c = Number(count);
   for (let i = 0; i < c; i++) {
     const [kv, nextP] = decodeMapScalarEntry(
@@ -2275,7 +2327,7 @@ function decodeMapFieldBody(
       options,
     );
     const convert = (v: any, type: ScalarFieldType | 'submsg' | undefined): any => {
-      if (type === 'bool') return v !== 0 && v !== 0n;
+      if (type === 'bool') return Boolean(v);
       if (type === 'float32') return roundFloat32Shortest(float32FromBits(Number(v)));
       if (type === 'float64') return float64FromBits(BigInt(v));
       if (type === 'uint32') return Number(BigInt(v) & 0xffffffffn) >>> 0;

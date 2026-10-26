@@ -17,7 +17,7 @@ it('matches the section 9 annotated packet', () => {
   enc.writeString(3, 'FRA');
   enc.writeUint(4, 42);
   enc.endSubMsg();
-  assert.equal(Buffer.from(enc.finish()).toString('hex'), '21b2046556021e0067074652418155');
+  assert.equal(Buffer.from(enc.finish()).toString('hex'), '21b2046772021e0075074652418155');
 });
 
 it('merges nested repeated fields and maps recursively across submessage occurrences', () => {
@@ -46,11 +46,11 @@ it('merges nested repeated fields and maps recursively across submessage occurre
 it('rejects malformed metadata and unknown containers while skipping unknown extensions', () => {
   const empty = defineMessage('Empty', {});
   const invalid = [
-    [0x0b, 0x05, 0x21, 0x01], // metadata type_name with the wrong wire type
-    [0x33, 0x05, 0xff, 0x01], // empty map with invalid MapType
-    [0x2f, 0x05, 0x05, 0x01], // count 2 but only one array value
-    [0x2b, 0x03, 0x00], // unknown submessage with truncated tag
-    [0x31, 0x03, 0x05], // submessage-array element exceeds container
+    [0x19, 0x05, 0x21, 0x01], // metadata type_name with the wrong wire type
+    [0x3d, 0x07, 0xff, 0x00, 0x01], // empty map with invalid KeyType
+    [0x3b, 0x07, 0x00, 0x05, 0x01], // count 2 but only one array value
+    [0x39, 0x03, 0x00], // unknown submessage with truncated tag
+    [0x3b, 0x07, 0x0c, 0x03, 0x05], // submessage-array element exceeds container
     [0x3f, 0x01], // extension missing ExtType
   ];
   for (const bytes of invalid) {
@@ -80,7 +80,7 @@ it('enforces depth 32 even in unknown fields', () => {
   assert.throws(() => decodeBlind(packet), /depth/);
 });
 
-it('uses valid uint map payloads for booleans and preserves fixed scalar meanings', () => {
+it('uses 1-byte boolean map payloads and preserves fixed scalar meanings', () => {
   const schema = defineMessage('Maps', {
     bools: { fieldNum: 1, type: 'map', mapKey: 'bool', mapVal: 'bool' },
     floats: { fieldNum: 2, type: 'map', mapVal: 'float64' },
@@ -92,7 +92,7 @@ it('uses valid uint map payloads for booleans and preserves fixed scalar meaning
   assert.deepEqual(result.bools, value.bools);
   assert.deepEqual(result.floats, value.floats);
   assert.deepEqual(result.signed, value.signed);
-  assert.deepEqual(decodeBlind(packet).field_1, { '1': 0, '0': 1 });
+  assert.deepEqual(decodeBlind(packet).field_1, { true: false, false: true });
 });
 
 it('preserves special map keys as own properties without mutating prototypes', () => {
@@ -116,10 +116,11 @@ it('counts isolated UTF-16 surrogates like TextEncoder', () => {
   }
 });
 
-it('accepts all prefix widths including nonzero TZCNT >= 3 markers', () => {
+it('accepts all valid prefix widths and rejects reserved nonzero 9-byte markers', () => {
   assert.deepEqual(decodeVarintBigInt(Uint8Array.from([2, 0])), [0n, 2]);
   assert.deepEqual(decodeVarintBigInt(Uint8Array.from([4, 0, 0, 0])), [0n, 4]);
-  assert.deepEqual(decodeVarintBigInt(Uint8Array.from([8, 1, 0, 0, 0, 0, 0, 0, 0])), [1n, 9]);
+  assert.deepEqual(decodeVarintBigInt(Uint8Array.from([0, 1, 0, 0, 0, 0, 0, 0, 0])), [1n, 9]);
+  assert.deepEqual(decodeVarintBigInt(Uint8Array.from([8, 1, 0, 0, 0, 0, 0, 0, 0])), [0n, 0]);
 });
 
 it('preserves field numbers beyond uint16 and 32-bit tag arithmetic', () => {
@@ -526,8 +527,8 @@ it('differential equivalence across MessageSchema, DescriptorRegistry, Opaque re
   assert.deepEqual((opaqueSub as any).tags, ['y']);
   assert.equal(readString(combined, 3)[0], 'middle'); // raw locateField sees superseded field 3, which is why activeOneofSlice is required
 
-  // Path 4: Blind decoder (sees raw unsigned varint on wire and merges repeated/maps)
+  // Path 4: Blind decoder (sees signed ZigZag varint on wire and merges repeated/maps)
   const blind = decodeBlind(combined) as any;
-  assert.equal(blind.kind, 4294967291);
-  assert.deepEqual(blind.kinds, [4294967291, 7]);
+  assert.equal(blind.kind, -5);
+  assert.deepEqual(blind.kinds, [-5, 7]);
 });

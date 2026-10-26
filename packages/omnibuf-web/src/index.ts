@@ -1,20 +1,20 @@
 import {
+  WireArray,
   WireBoolFalse,
   WireBoolTrue,
   WireBytes,
   WireExtended,
   WireFixed32,
   WireFixed64,
-  WireFixedArr,
+  WireFloat32,
+  WireFloat64,
   WireMap,
+  WireSfixed32,
+  WireSfixed64,
   WireSint,
-  WireSintArr,
   WireString,
-  WireStringArr,
   WireSubMsg,
-  WireSubMsgArr,
   WireUint,
-  WireUintArr,
   base64ToUint8Array,
   decodeBlind,
   decodeSchemaMeta,
@@ -93,34 +93,34 @@ export function wireTypeName(wireType: number): string {
   switch (wireType) {
     case WireUint:
       return 'uint';
+    case WireSint:
+      return 'sint';
     case WireBoolFalse:
       return 'bool_false';
     case WireBoolTrue:
       return 'bool_true';
+    case WireFixed32:
+      return 'fixed32';
+    case WireFixed64:
+      return 'fixed64';
+    case WireSfixed32:
+      return 'sfixed32';
+    case WireSfixed64:
+      return 'sfixed64';
+    case WireFloat32:
+      return 'float32';
+    case WireFloat64:
+      return 'float64';
     case WireString:
       return 'string';
     case WireBytes:
       return 'bytes';
     case WireSubMsg:
       return 'submsg';
-    case WireStringArr:
-      return 'string_arr';
-    case WireUintArr:
-      return 'uint_arr';
-    case WireSubMsgArr:
-      return 'submsg_arr';
+    case WireArray:
+      return 'array';
     case WireMap:
       return 'map';
-    case WireFixed32:
-      return 'fixed32';
-    case WireFixed64:
-      return 'fixed64';
-    case WireSint:
-      return 'sint';
-    case WireSintArr:
-      return 'sint_arr';
-    case WireFixedArr:
-      return 'fixed_arr';
     case WireExtended:
       return 'extended';
     default:
@@ -444,7 +444,7 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
   while (pos < packet.length) {
     const startOffset = pos;
     const [rawTag, tn] = decodeVarintBigInt(packet, pos);
-    if (tn === 0 || rawTag >> 4n > 0xffffffffn) {
+    if (tn === 0 || rawTag >> 4n > 536870911n) {
       throw new Error(`omnibuf/web: invalid or truncated tag at ${pos}`);
     }
     const fieldNumber = Number(rawTag >> 4n);
@@ -488,6 +488,32 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
           throw new Error(`omnibuf/web: truncated fixed32 at ${tagEnd}`);
         }
         valEnd = tagEnd + 4;
+        previewValue =
+          (packet[tagEnd]! |
+            (packet[tagEnd + 1]! << 8) |
+            (packet[tagEnd + 2]! << 16) |
+            (packet[tagEnd + 3]! << 24)) >>>
+          0;
+        break;
+      }
+      case WireSfixed32: {
+        if (packet.length - tagEnd < 4) {
+          throw new Error(`omnibuf/web: truncated sfixed32 at ${tagEnd}`);
+        }
+        valEnd = tagEnd + 4;
+        previewValue =
+          packet[tagEnd]! |
+          (packet[tagEnd + 1]! << 8) |
+          (packet[tagEnd + 2]! << 16) |
+          (packet[tagEnd + 3]! << 24) |
+          0;
+        break;
+      }
+      case WireFloat32: {
+        if (packet.length - tagEnd < 4) {
+          throw new Error(`omnibuf/web: truncated float32 at ${tagEnd}`);
+        }
+        valEnd = tagEnd + 4;
         const u32 =
           (packet[tagEnd]! |
             (packet[tagEnd + 1]! << 8) |
@@ -500,6 +526,31 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
       case WireFixed64: {
         if (packet.length - tagEnd < 8) {
           throw new Error(`omnibuf/web: truncated fixed64 at ${tagEnd}`);
+        }
+        valEnd = tagEnd + 8;
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(packet[tagEnd + b]!);
+        }
+        previewValue = u64 <= 9007199254740991n ? Number(u64) : u64;
+        break;
+      }
+      case WireSfixed64: {
+        if (packet.length - tagEnd < 8) {
+          throw new Error(`omnibuf/web: truncated sfixed64 at ${tagEnd}`);
+        }
+        valEnd = tagEnd + 8;
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(packet[tagEnd + b]!);
+        }
+        const s64 = BigInt.asIntN(64, u64);
+        previewValue = s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64;
+        break;
+      }
+      case WireFloat64: {
+        if (packet.length - tagEnd < 8) {
+          throw new Error(`omnibuf/web: truncated float64 at ${tagEnd}`);
         }
         valEnd = tagEnd + 8;
         let u64 = 0n;

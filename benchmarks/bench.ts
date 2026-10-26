@@ -1,4 +1,8 @@
+import { writeFileSync } from 'node:fs';
+import { cpus, platform, arch as osArch } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 import {
   create as createBufMsg,
   createFileRegistry,
@@ -391,19 +395,25 @@ function runBench(
   return { name, opsPerSec, nsPerOp, bytes: options?.bytes };
 }
 
+const outputLines: string[] = [];
+function logLine(line = ''): void {
+  console.log(line);
+  outputLines.push(line);
+}
+
 function printTable(title: string, results: BenchResult[], baselineIdx = 0): void {
-  console.log(`\n### ${title}\n`);
+  logLine(`\n### ${title}\n`);
   const showBytes = results.some((r) => r.bytes !== undefined);
   const baselineNs = results[baselineIdx]?.nsPerOp ?? 1;
 
   if (showBytes) {
-    console.log(
+    logLine(
       '| Codec / Operation | Latency (ns/op) | Throughput (ops/sec) | Wire Size (B) | vs Baseline |',
     );
-    console.log('|---|---:|---:|---:|---:|');
+    logLine('|---|---:|---:|---:|---:|');
   } else {
-    console.log('| Codec / Operation | Latency (ns/op) | Throughput (ops/sec) | vs Baseline |');
-    console.log('|---|---:|---:|---:|');
+    logLine('| Codec / Operation | Latency (ns/op) | Throughput (ops/sec) | vs Baseline |');
+    logLine('|---|---:|---:|---:|');
   }
 
   for (const r of results) {
@@ -417,9 +427,9 @@ function printTable(title: string, results: BenchResult[], baselineIdx = 0): voi
           ? `${ratio.toFixed(2)}x slower`
           : `${(1 / ratio).toFixed(2)}x faster`;
     if (showBytes) {
-      console.log(`| ${r.name} | ${nsStr} ns | ${opsStr} | ${r.bytes ?? '-'} | ${relStr} |`);
+      logLine(`| ${r.name} | ${nsStr} ns | ${opsStr} | ${r.bytes ?? '-'} | ${relStr} |`);
     } else {
-      console.log(`| ${r.name} | ${nsStr} ns | ${opsStr} | ${relStr} |`);
+      logLine(`| ${r.name} | ${nsStr} ns | ${opsStr} | ${relStr} |`);
     }
   }
 }
@@ -466,10 +476,13 @@ const gpbBytes = encodeGoogleProtobuf(sample);
 const msgpackBytes = msgpackEncode(sample);
 const jsonBytes = textEncoder.encode(JSON.stringify(sample));
 
-console.log('============================================================================');
-console.log('OmniBuf-ES Benchmark Suite (Node.js ' + process.version + ' / ' + process.arch + ')');
-console.log('Workload: Canonical PeerUpdate (nested submessage, 4 neighbors, arrays, scalars)');
-console.log('============================================================================');
+const cpuModel = cpus()[0]?.model ?? 'unknown';
+logLine('============================================================================');
+logLine(
+  `OmniBuf-ES Benchmark Suite (Node.js ${process.version} / ${platform()}-${osArch()} / ${cpuModel})`,
+);
+logLine('Workload: Canonical PeerUpdate (nested submessage, 4 neighbors, arrays, scalars)');
+logLine('============================================================================');
 
 // 1. Full Message Encode
 const marshalResults: BenchResult[] = [
@@ -574,3 +587,64 @@ printTable(
   mutateResults,
   0,
 );
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const rawTxtPath = resolve(repoRoot, 'testdata/benchmarks.txt');
+const rawJsonPath = resolve(repoRoot, 'testdata/benchmarks.json');
+
+writeFileSync(rawTxtPath, `${outputLines.join('\n')}\n`, 'utf8');
+writeFileSync(
+  rawJsonPath,
+  `${JSON.stringify(
+    {
+      runtime: `Node.js ${process.version}`,
+      platform: platform(),
+      arch: osArch(),
+      cpu: cpuModel,
+      workload: 'PeerUpdate',
+      categories: [
+        {
+          id: 'encode',
+          title: 'Full Message Encode Speed (PeerUpdate)',
+          results: marshalResults.map((r) => ({
+            name: r.name,
+            nsPerOp: Math.round(r.nsPerOp),
+            opsPerSec: Math.round(r.opsPerSec),
+            wireBytes: r.bytes,
+          })),
+        },
+        {
+          id: 'decode',
+          title: 'Full Message Decode Speed (PeerUpdate)',
+          results: unmarshalResults.map((r) => ({
+            name: r.name,
+            nsPerOp: Math.round(r.nsPerOp),
+            opsPerSec: Math.round(r.opsPerSec),
+          })),
+        },
+        {
+          id: 'lookup_city',
+          title: 'Read a Single Nested Field (peer.location.city)',
+          results: lookupCityResults.map((r) => ({
+            name: r.name,
+            nsPerOp: Math.round(r.nsPerOp),
+            opsPerSec: Math.round(r.opsPerSec),
+          })),
+        },
+        {
+          id: 'mutate_sequence',
+          title: 'Selective Single-Field Mutation (update peer.sequence & re-serialize)',
+          results: mutateResults.map((r) => ({
+            name: r.name,
+            nsPerOp: Math.round(r.nsPerOp),
+            opsPerSec: Math.round(r.opsPerSec),
+          })),
+        },
+      ],
+    },
+    null,
+    2,
+  )}\n`,
+  'utf8',
+);
+console.log(`\nSaved raw benchmark data to ${rawTxtPath} and ${rawJsonPath}`);

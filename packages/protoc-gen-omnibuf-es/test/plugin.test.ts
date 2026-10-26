@@ -211,7 +211,7 @@ it('executes generated encoders, decoders and opaque mutations for maps, bytes, 
     assert.equal(opaque.getFlags(), flagsFirst);
     assert.equal(opaque.getItems().first.id, 42);
     const selfDescUnmodified = opaque.marshal({ selfDescribing: true });
-    assert.equal(selfDescUnmodified[0], 0x0b);
+    assert.equal(selfDescUnmodified[0], 0x19);
     opaque.setNames({ '7': 'seven' });
     opaque.setFlags([true]);
     const changed = generated.decodeExample(opaque.marshal({ selfDescribing: true }));

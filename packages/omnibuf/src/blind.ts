@@ -3,8 +3,9 @@
 // ============================================================================
 
 import { validateMapTypes, validateValue } from './validation.js';
-import { Encoder, mapHeaderByte } from './encoder.js';
+import { Encoder } from './encoder.js';
 import {
+  appendBoolArrBody,
   appendSintArrAutoBody,
   appendStringArrBody,
   appendUintArrAutoBody,
@@ -12,22 +13,22 @@ import {
 } from './readers.js';
 import {
   MaxNestingDepth,
+  WireArray,
   WireBoolFalse,
   WireBoolTrue,
   WireBytes,
   WireExtended,
   WireFixed32,
   WireFixed64,
-  WireFixedArr,
+  WireFloat32,
+  WireFloat64,
   WireMap,
+  WireSfixed32,
+  WireSfixed64,
   WireSint,
-  WireSintArr,
   WireString,
-  WireStringArr,
   WireSubMsg,
-  WireSubMsgArr,
   WireUint,
-  WireUintArr,
   decodeUTF8,
   decodeVarintAuto,
   decodeVarintBigInt,
@@ -35,13 +36,16 @@ import {
   float32FromBits,
   float64FromBits,
   nextContainerField,
+  parseArrayHeader,
+  parseMapHeader,
   readLenSlice,
   roundFloat32Shortest,
+  skipValue,
 } from './wire.js';
 
 /**
  * SchemaMeta is the optional inline schema header encoded as Field #0
- * (`Tag = 0x0B`, `WireSubMsg = 5`) at byte 0 of an OmniBuf message (`omnibuf.v1.SchemaMeta`).
+ * (`Tag = 0x19`, `WireSubMsg = 12`) at byte 0 of an OmniBuf message (`omnibuf.v1.SchemaMeta`).
  */
 export interface SchemaMeta {
   typeName?: string;
@@ -116,21 +120,22 @@ function writeSchemaMetaBody(
   deterministic: boolean,
 ): void {
   if (!meta) return;
-  // Field #1: type_name (WireString = 3 -> Tag (1 << 4) | 3 = 19 -> 0x27)
+  // Field #1: type_name (WireString = 10 -> Tag (1 << 4) | 10 = 26 -> 0x35)
   if (meta.typeName && meta.typeName.length > 0) {
-    enc.writeByte(0x27);
+    enc.writeByte(0x35);
     enc.writeRawStringPayload(meta.typeName);
   }
-  // Field #2: fields map<uint32, string> (WireMap = 9 -> Tag (2 << 4) | 9 = 41 -> 0x53)
+  // Field #2: fields map<uint32, string> (WireMap = 14 -> Tag (2 << 4) | 14 = 46 -> 0x5D)
   if (meta.fields) {
     const keys = Object.keys(meta.fields).map(Number);
     if (keys.length > 0) {
       if (deterministic) {
         keys.sort((a, b) => a - b);
       }
-      enc.writeByte(0x53);
+      enc.writeByte(0x5d);
       enc.beginContainer();
-      enc.writeByte(mapHeaderByte(WireUint, WireString));
+      enc.writeByte(WireUint);
+      enc.writeByte(WireString);
       enc.writeRawVarint(keys.length);
       for (const k of keys) {
         const name = meta.fields[k] ?? '';
@@ -140,16 +145,17 @@ function writeSchemaMetaBody(
       enc.endContainer();
     }
   }
-  // Field #3: children map<uint32, SchemaMeta> (WireMap = 9 -> Tag (3 << 4) | 9 = 57 -> 0x73)
+  // Field #3: children map<uint32, SchemaMeta> (WireMap = 14 -> Tag (3 << 4) | 14 = 62 -> 0x7D)
   if (meta.children) {
     const keys = Object.keys(meta.children).map(Number);
     if (keys.length > 0) {
       if (deterministic) {
         keys.sort((a, b) => a - b);
       }
-      enc.writeByte(0x73);
+      enc.writeByte(0x7d);
       enc.beginContainer();
-      enc.writeByte(mapHeaderByte(WireUint, WireSubMsg));
+      enc.writeByte(WireUint);
+      enc.writeByte(WireSubMsg);
       enc.writeRawVarint(keys.length);
       for (const k of keys) {
         const child = meta.children[k];
@@ -164,7 +170,7 @@ function writeSchemaMetaBody(
 }
 
 /**
- * Writes Field #0 (`Tag = 0x0B`, `WireSubMsg = 5`) containing `meta` into `enc`.
+ * Writes Field #0 (`Tag = 0x19`, `WireSubMsg = 12`) containing `meta` into `enc`.
  */
 export function writeField0SchemaMeta(
   enc: Encoder,
@@ -172,14 +178,14 @@ export function writeField0SchemaMeta(
   deterministic = false,
 ): void {
   if (!meta) return;
-  enc.writeByte(0x0b); // Tag = (0 << 4) | WireSubMsg(5) = 5 -> (5 << 1) | 1 = 0x0B
+  enc.writeByte(0x19); // Tag = (0 << 4) | WireSubMsg(12) = 12 -> (12 << 1) | 1 = 0x19
   enc.beginContainer();
   writeSchemaMetaBody(enc, meta, deterministic);
   enc.endContainer();
 }
 
 /**
- * Encodes Field #0 (`Tag = 0x0B`, `WireSubMsg = 5`) containing `meta` as a Uint8Array.
+ * Encodes Field #0 (`Tag = 0x19`, `WireSubMsg = 12`) containing `meta` as a Uint8Array.
  */
 export function encodeField0SchemaMeta(
   meta: SchemaMeta | null | undefined,
@@ -245,8 +251,8 @@ export function decodeSchemaMeta(data: Uint8Array, depth = 0, limit = MaxNesting
 
   while (pos < n) {
     const [tag, tn] = decodeVarintBigInt(data, pos);
-    if (tn === 0) {
-      throw new Error(`omnibuf: truncated tag in Field #0 SchemaMeta at ${pos}`);
+    if (tn === 0 || tag >> 4n > 536870911n) {
+      throw new Error(`omnibuf: truncated or invalid tag in Field #0 SchemaMeta at ${pos}`);
     }
     pos += tn;
     const fnum = Number(tag >> 4n);
@@ -266,23 +272,17 @@ export function decodeSchemaMeta(data: Uint8Array, depth = 0, limit = MaxNesting
         if (wt !== WireMap) {
           throw new Error(`omnibuf: SchemaMeta field #2 (fields) must be WireMap, got ${wt}`);
         }
-        const [body, nextPos] = readLenSlice(data, pos, 2);
+        const [body, nextPos] = readLenSlice(data, pos, 3);
         pos = nextPos;
-        if (body[0] !== mapHeaderByte(WireUint, WireString)) {
-          throw new Error(
-            `omnibuf: SchemaMeta fields map must have MapType 0x03, got 0x${body[0]!.toString(16)}`,
-          );
-        }
-        const [count, cn] = decodeVarintBigInt(body, 1);
-        if (cn === 0 || count * 2n > BigInt(body.length - (1 + cn))) {
-          throw new Error(`omnibuf: SchemaMeta fields count ${count} exceeds body`);
+        const [keyWT, valWT, c, startP, ok] = parseMapHeader(body);
+        if (!ok || keyWT !== WireUint || valWT !== WireString) {
+          throw new Error('omnibuf: invalid SchemaMeta fields map header');
         }
         if (!meta.fields) meta.fields = {};
-        let p = 1 + cn;
-        const c = Number(count);
+        let p = startP;
         for (let i = 0; i < c; i++) {
           const [k64, kn] = decodeVarintBigInt(body, p);
-          if (kn === 0 || k64 === 0n || k64 > 0xffffffffn) {
+          if (kn === 0 || k64 === 0n || k64 > 536870911n) {
             throw new Error(`omnibuf: invalid SchemaMeta field number ${k64} at ${p}`);
           }
           p += kn;
@@ -301,23 +301,17 @@ export function decodeSchemaMeta(data: Uint8Array, depth = 0, limit = MaxNesting
         if (wt !== WireMap) {
           throw new Error(`omnibuf: SchemaMeta field #3 (children) must be WireMap, got ${wt}`);
         }
-        const [body, nextPos] = readLenSlice(data, pos, 2);
+        const [body, nextPos] = readLenSlice(data, pos, 3);
         pos = nextPos;
-        if (body[0] !== mapHeaderByte(WireUint, WireSubMsg)) {
-          throw new Error(
-            `omnibuf: SchemaMeta children map must have MapType 0x05, got 0x${body[0]!.toString(16)}`,
-          );
-        }
-        const [count, cn] = decodeVarintBigInt(body, 1);
-        if (cn === 0 || count * 2n > BigInt(body.length - (1 + cn))) {
-          throw new Error(`omnibuf: SchemaMeta children count ${count} exceeds body`);
+        const [keyWT, valWT, c, startP, ok] = parseMapHeader(body);
+        if (!ok || keyWT !== WireUint || valWT !== WireSubMsg) {
+          throw new Error('omnibuf: invalid SchemaMeta children map header');
         }
         if (!meta.children) meta.children = {};
-        let p = 1 + cn;
-        const c = Number(count);
+        let p = startP;
         for (let i = 0; i < c; i++) {
           const [k64, kn] = decodeVarintBigInt(body, p);
-          if (kn === 0 || k64 === 0n || k64 > 0xffffffffn) {
+          if (kn === 0 || k64 === 0n || k64 > 536870911n) {
             throw new Error(`omnibuf: invalid SchemaMeta child field number ${k64} at ${p}`);
           }
           p += kn;
@@ -407,35 +401,51 @@ function decodeBlindWithSchema(
   }
 
   let activeSchema: SchemaMeta | null = inherited ? mergeSchemaMeta(null, inherited) : null;
-  let pos = 0;
   const out: Record<string, unknown> = target ?? {};
-  // Wire names and map keys are arbitrary strings, including __proto__.
-  const own = (key: string) => (Object.hasOwn(out, key) ? out[key] : undefined);
   const roundF32 = options.roundFloat32 !== false;
+
+  // Pre-scan all Field #0 (SchemaMeta) blocks in the message stream before resolving field names.
+  let scanPos = 0;
+  while (scanPos < n) {
+    const [tag, tn] = decodeVarintBigInt(data, scanPos);
+    if (tn === 0 || tag >> 4n > 536870911n) {
+      throw new Error(`omnibuf: truncated or invalid tag at ${scanPos}`);
+    }
+    scanPos += tn;
+    const fieldNum = Number(tag >> 4n);
+    const wt = Number(tag & 0x0fn);
+    if (fieldNum === 0) {
+      if (wt !== WireSubMsg) {
+        throw new Error(`omnibuf: Field #0 must have WireSubMsg wire type (12), got ${wt}`);
+      }
+      const [f0Body, nextPos] = readLenSlice(data, scanPos, 0);
+      scanPos = nextPos;
+      const parsedMeta = decodeSchemaMeta(f0Body, depth + 1);
+      activeSchema = mergeSchemaMeta(activeSchema, parsedMeta);
+      continue;
+    }
+    scanPos = skipValue(data, scanPos, wt);
+  }
+
+  const subPackets = new Map<number, Uint8Array[]>();
+  const arrayElemTypes = new Map<number, number>();
+  let pos = 0;
 
   while (pos < n) {
     const [tag, tn] = decodeVarintBigInt(data, pos);
-    if (tn === 0 || tag >> 4n > 0xffffffffn) {
-      throw new Error(`omnibuf: truncated tag at ${pos}`);
-    }
     pos += tn;
     const fieldNum = Number(tag >> 4n);
     const wt = Number(tag & 0x0fn);
 
     if (fieldNum === 0) {
-      if (wt !== WireSubMsg) {
-        throw new Error(`omnibuf: Field #0 must have WireSubMsg wire type (5), got ${wt}`);
-      }
-      const [f0Body, nextPos] = readLenSlice(data, pos, 0);
+      const [, nextPos] = readLenSlice(data, pos, 0);
       pos = nextPos;
-      const parsedMeta = decodeSchemaMeta(f0Body, depth + 1);
-      activeSchema = mergeSchemaMeta(activeSchema, parsedMeta);
       continue;
     }
 
     const name = activeSchema?.fields?.[fieldNum] || `field_${fieldNum}`;
     const childSchema = activeSchema?.children?.[fieldNum] ?? null;
-    if (!Object.hasOwn(out, name)) setOwn(out, name, undefined);
+    if (!Object.hasOwn(out, name) && wt !== WireSubMsg) setOwn(out, name, undefined);
 
     switch (wt) {
       case WireUint: {
@@ -476,87 +486,28 @@ function decodeBlindWithSchema(
       }
       case WireSubMsg: {
         const [subBytes, nextPos] = readLenSlice(data, pos, 0);
-        const prev = own(name);
-        const targetSub =
-          prev && typeof prev === 'object' && !Array.isArray(prev) && !(prev instanceof Uint8Array)
-            ? (prev as Record<string, unknown>)
-            : undefined;
-        out[name] = decodeBlindWithSchema(subBytes, childSchema, depth + 1, options, targetSub);
+        let chunks = subPackets.get(fieldNum);
+        if (!chunks) {
+          chunks = [];
+          subPackets.set(fieldNum, chunks);
+        }
+        chunks.push(subBytes);
         pos = nextPos;
         break;
       }
-      case WireStringArr: {
-        const [body, nextPos] = readLenSlice(data, pos, 1);
-        const prev = Array.isArray(out[name]) ? (out[name] as string[]) : [];
-        const [arr, ok] = appendStringArrBody(prev, body);
+      case WireArray: {
+        const [body, nextPos] = readLenSlice(data, pos, 2);
+        const [elemType, , , ok] = parseArrayHeader(body);
         if (!ok) {
-          throw new Error(`omnibuf: invalid WireStringArr at ${pos}`);
+          throw new Error(`omnibuf: invalid WireArray header at ${pos}`);
         }
-        out[name] = arr;
-        pos = nextPos;
-        break;
-      }
-      case WireUintArr: {
-        const [body, nextPos] = readLenSlice(data, pos, 1);
-        const prev = Array.isArray(out[name]) ? (out[name] as (number | bigint)[]) : [];
-        const [arr, ok] = appendUintArrAutoBody(prev, body);
-        if (!ok) {
-          throw new Error(`omnibuf: invalid WireUintArr at ${pos}`);
+        const prevElemType = arrayElemTypes.get(fieldNum);
+        if (prevElemType !== undefined && prevElemType !== elemType) {
+          throw new Error(`omnibuf: conflicting WireArray element types for field ${fieldNum}`);
         }
-        out[name] = arr;
-        pos = nextPos;
-        break;
-      }
-      case WireSintArr: {
-        const [body, nextPos] = readLenSlice(data, pos, 1);
-        const prev = Array.isArray(out[name]) ? (out[name] as (number | bigint)[]) : [];
-        const [arr, ok] = appendSintArrAutoBody(prev, body);
-        if (!ok) {
-          throw new Error(`omnibuf: invalid WireSintArr at ${pos}`);
-        }
-        out[name] = arr;
-        pos = nextPos;
-        break;
-      }
-      case WireFixedArr: {
-        const [body, nextPos] = readLenSlice(data, pos, 1);
-        const elemType = body[0]!;
-        if (elemType === WireFixed32) {
-          if ((body.length - 1) % 4 !== 0) {
-            throw new Error(`omnibuf: invalid WireFixedArr(Fixed32) at ${pos}`);
-          }
-          const prev = Array.isArray(out[name]) ? (out[name] as number[]) : [];
-          const c = (body.length - 1) / 4;
-          for (let i = 0; i < c; i++) {
-            const off = 1 + i * 4;
-            const bits =
-              (body[off]! |
-                (body[off + 1]! << 8) |
-                (body[off + 2]! << 16) |
-                (body[off + 3]! << 24)) >>>
-              0;
-            const f32 = float32FromBits(bits);
-            prev.push(roundF32 ? roundFloat32Shortest(f32) : f32);
-          }
-          out[name] = prev;
-        } else if (elemType === WireFixed64) {
-          if ((body.length - 1) % 8 !== 0) {
-            throw new Error(`omnibuf: invalid WireFixedArr(Fixed64) at ${pos}`);
-          }
-          const prev = Array.isArray(out[name]) ? (out[name] as number[]) : [];
-          const c = (body.length - 1) / 8;
-          for (let i = 0; i < c; i++) {
-            const off = 1 + i * 8;
-            let u64 = 0n;
-            for (let b = 7; b >= 0; b--) {
-              u64 = (u64 << 8n) | BigInt(body[off + b]!);
-            }
-            prev.push(float64FromBits(u64));
-          }
-          out[name] = prev;
-        } else {
-          throw new Error(`omnibuf: invalid WireFixedArr ElemType ${elemType}`);
-        }
+        arrayElemTypes.set(fieldNum, elemType);
+        const prev = Array.isArray(out[name]) ? (out[name] as unknown[]) : [];
+        out[name] = decodeArrayBodyBlind(prev, body, childSchema, depth, options);
         pos = nextPos;
         break;
       }
@@ -566,66 +517,41 @@ function decodeBlindWithSchema(
           `omnibuf: unrecognized WireExtended subtype 0x${body[0]!.toString(16).padStart(2, '0')}`,
         );
       }
-      case WireSubMsgArr: {
-        const [arrPayload, nextPos] = readLenSlice(data, pos, 0);
-        const [elemCount, ok] = countSubMsgArrElems(arrPayload);
-        if (!ok) {
-          throw new Error(`omnibuf: corrupt WireSubMsgArr element framing at ${pos}`);
-        }
-        const elems: Record<string, unknown>[] = Array.isArray(out[name])
-          ? (out[name] as Record<string, unknown>[])
-          : [];
-        let p = 0;
-        for (let i = 0; i < elemCount; i++) {
-          const [el, en] = decodeVarintBigInt(arrPayload, p);
-          p += en;
-          const elNum = Number(el);
-          const elemMap = decodeBlindWithSchema(
-            arrPayload.subarray(p, p + elNum),
-            childSchema,
-            depth + 1,
-            options,
-          );
-          elems.push(elemMap);
-          p += elNum;
-        }
-        out[name] = elems;
-        pos = nextPos;
-        break;
-      }
       case WireMap: {
-        const [body, nextPos] = readLenSlice(data, pos, 2);
-        const mapType = body[0]!;
-        const keyWT = mapType >>> 4;
-        const valWT = mapType & 0x0f;
-        validateMapTypes(keyWT, valWT);
-        const [count, cn] = decodeVarintBigInt(body, 1);
-        if (cn === 0 || count * 2n > BigInt(body.length - (1 + cn))) {
-          throw new Error(`omnibuf: WireMap count ${count} exceeds body (${body.length} B)`);
-        }
+        const [body, nextPos] = readLenSlice(data, pos, 3);
         const prev = out[name];
         const m: Record<string, unknown> =
           prev && typeof prev === 'object' && !Array.isArray(prev) && !(prev instanceof Uint8Array)
             ? (prev as Record<string, unknown>)
             : {};
-        let p = 1 + cn;
-        const c = Number(count);
-        for (let i = 0; i < c; i++) {
-          const [k, nextP] = decodeMapKeyBlind(body, p, keyWT);
-          const [v, nextP2] = decodeMapValBlind(body, nextP, valWT, childSchema, depth, options);
-          p = nextP2;
-          setOwn(m, k, v);
-        }
-        if (p !== body.length) {
-          throw new Error(`omnibuf: WireMap trailing bytes (parsed ${p}, body ${body.length})`);
-        }
-        out[name] = m;
+        out[name] = decodeMapBodyBlind(m, body, childSchema, depth, options);
         pos = nextPos;
         break;
       }
       case WireFixed32: {
         if (n - pos < 4) {
           throw new Error(`omnibuf: truncated WireFixed32 at ${pos}`);
+        }
+        const u32 =
+          (data[pos]! | (data[pos + 1]! << 8) | (data[pos + 2]! << 16) | (data[pos + 3]! << 24)) >>>
+          0;
+        out[name] = u32;
+        pos += 4;
+        break;
+      }
+      case WireSfixed32: {
+        if (n - pos < 4) {
+          throw new Error(`omnibuf: truncated WireSfixed32 at ${pos}`);
+        }
+        const i32 =
+          data[pos]! | (data[pos + 1]! << 8) | (data[pos + 2]! << 16) | (data[pos + 3]! << 24) | 0;
+        out[name] = i32;
+        pos += 4;
+        break;
+      }
+      case WireFloat32: {
+        if (n - pos < 4) {
+          throw new Error(`omnibuf: truncated WireFloat32 at ${pos}`);
         }
         const bits =
           (data[pos]! | (data[pos + 1]! << 8) | (data[pos + 2]! << 16) | (data[pos + 3]! << 24)) >>>
@@ -643,6 +569,31 @@ function decodeBlindWithSchema(
         for (let b = 7; b >= 0; b--) {
           u64 = (u64 << 8n) | BigInt(data[pos + b]!);
         }
+        out[name] = u64 <= 9007199254740991n ? Number(u64) : u64;
+        pos += 8;
+        break;
+      }
+      case WireSfixed64: {
+        if (n - pos < 8) {
+          throw new Error(`omnibuf: truncated WireSfixed64 at ${pos}`);
+        }
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(data[pos + b]!);
+        }
+        const s64 = BigInt.asIntN(64, u64);
+        out[name] = s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64;
+        pos += 8;
+        break;
+      }
+      case WireFloat64: {
+        if (n - pos < 8) {
+          throw new Error(`omnibuf: truncated WireFloat64 at ${pos}`);
+        }
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(data[pos + b]!);
+        }
         out[name] = float64FromBits(u64);
         pos += 8;
         break;
@@ -652,7 +603,241 @@ function decodeBlindWithSchema(
     }
   }
 
+  for (const [fieldNum, chunks] of subPackets.entries()) {
+    const name = activeSchema?.fields?.[fieldNum] || `field_${fieldNum}`;
+    const childSchema = activeSchema?.children?.[fieldNum] ?? null;
+    let combined: Uint8Array;
+    if (chunks.length === 1) {
+      combined = chunks[0]!;
+    } else {
+      let totalLen = 0;
+      for (const c of chunks) totalLen += c.length;
+      combined = new Uint8Array(totalLen);
+      let off = 0;
+      for (const c of chunks) {
+        combined.set(c, off);
+        off += c.length;
+      }
+    }
+    setOwn(out, name, decodeBlindWithSchema(combined, childSchema, depth + 1, options));
+  }
+
   return out;
+}
+
+function decodeArrayBodyBlind(
+  prev: unknown[],
+  body: Uint8Array,
+  childSchema: SchemaMeta | null,
+  depth: number,
+  options: DecodeBlindOptions,
+): unknown[] {
+  if (depth > MaxNestingDepth) {
+    throw new Error(`omnibuf: nesting depth ${depth} exceeds MaxNestingDepth (${MaxNestingDepth})`);
+  }
+  const [elemType, count, startP, ok] = parseArrayHeader(body);
+  if (!ok) {
+    throw new Error('omnibuf: invalid WireArray header');
+  }
+  const roundF32 = options.roundFloat32 !== false;
+
+  switch (elemType) {
+    case WireBoolFalse: {
+      const [arr, valid] = appendBoolArrBody(prev as boolean[], body);
+      if (!valid) throw new Error('omnibuf: invalid WireArray(bool)');
+      return arr;
+    }
+    case WireUint: {
+      const [arr, valid] = appendUintArrAutoBody(prev as (number | bigint)[], body);
+      if (!valid) throw new Error('omnibuf: invalid WireArray(uint)');
+      return arr;
+    }
+    case WireSint: {
+      const [arr, valid] = appendSintArrAutoBody(prev as (number | bigint)[], body);
+      if (!valid) throw new Error('omnibuf: invalid WireArray(sint)');
+      return arr;
+    }
+    case WireString: {
+      const [arr, valid] = appendStringArrBody(prev as string[], body);
+      if (!valid) throw new Error('omnibuf: invalid WireArray(string)');
+      return arr;
+    }
+    case WireBytes: {
+      let p = startP;
+      for (let i = 0; i < count; i++) {
+        const [b, nextP] = readLenSlice(body, p, 0);
+        prev.push(options.bytesAsBase64 ? uint8ArrayToBase64(b) : b.slice());
+        p = nextP;
+      }
+      if (p !== body.length) throw new Error('omnibuf: WireArray(bytes) trailing bytes');
+      return prev;
+    }
+    case WireFixed32: {
+      if (body.length - startP !== count * 4) {
+        throw new Error('omnibuf: invalid WireArray(fixed32) length');
+      }
+      for (let i = 0; i < count; i++) {
+        const off = startP + i * 4;
+        const u32 =
+          (body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24)) >>>
+          0;
+        prev.push(u32);
+      }
+      return prev;
+    }
+    case WireSfixed32: {
+      if (body.length - startP !== count * 4) {
+        throw new Error('omnibuf: invalid WireArray(sfixed32) length');
+      }
+      for (let i = 0; i < count; i++) {
+        const off = startP + i * 4;
+        const i32 =
+          body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24) | 0;
+        prev.push(i32);
+      }
+      return prev;
+    }
+    case WireFloat32: {
+      if (body.length - startP !== count * 4) {
+        throw new Error('omnibuf: invalid WireArray(float32) length');
+      }
+      for (let i = 0; i < count; i++) {
+        const off = startP + i * 4;
+        const bits =
+          (body[off]! | (body[off + 1]! << 8) | (body[off + 2]! << 16) | (body[off + 3]! << 24)) >>>
+          0;
+        const f32 = float32FromBits(bits);
+        prev.push(roundF32 ? roundFloat32Shortest(f32) : f32);
+      }
+      return prev;
+    }
+    case WireFixed64: {
+      if (body.length - startP !== count * 8) {
+        throw new Error('omnibuf: invalid WireArray(fixed64) length');
+      }
+      for (let i = 0; i < count; i++) {
+        const off = startP + i * 8;
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(body[off + b]!);
+        }
+        prev.push(u64 <= 9007199254740991n ? Number(u64) : u64);
+      }
+      return prev;
+    }
+    case WireSfixed64: {
+      if (body.length - startP !== count * 8) {
+        throw new Error('omnibuf: invalid WireArray(sfixed64) length');
+      }
+      for (let i = 0; i < count; i++) {
+        const off = startP + i * 8;
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(body[off + b]!);
+        }
+        const s64 = BigInt.asIntN(64, u64);
+        prev.push(s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64);
+      }
+      return prev;
+    }
+    case WireFloat64: {
+      if (body.length - startP !== count * 8) {
+        throw new Error('omnibuf: invalid WireArray(float64) length');
+      }
+      for (let i = 0; i < count; i++) {
+        const off = startP + i * 8;
+        let u64 = 0n;
+        for (let b = 7; b >= 0; b--) {
+          u64 = (u64 << 8n) | BigInt(body[off + b]!);
+        }
+        prev.push(float64FromBits(u64));
+      }
+      return prev;
+    }
+    case WireSubMsg: {
+      const [elemCount, valid] = countSubMsgArrElems(body);
+      if (!valid) throw new Error('omnibuf: corrupt WireArray(submsg) framing');
+      let p = startP;
+      for (let i = 0; i < elemCount; i++) {
+        const [el, en] = decodeVarintBigInt(body, p);
+        p += en;
+        const elNum = Number(el);
+        const elemMap = decodeBlindWithSchema(
+          body.subarray(p, p + elNum),
+          childSchema,
+          depth + 1,
+          options,
+        );
+        prev.push(elemMap);
+        p += elNum;
+      }
+      return prev;
+    }
+    case WireArray: {
+      let p = startP;
+      for (let i = 0; i < count; i++) {
+        const [nestedBody, nextP] = readLenSlice(body, p, 2);
+        prev.push(decodeArrayBodyBlind([], nestedBody, childSchema, depth + 1, options));
+        p = nextP;
+      }
+      if (p !== body.length) throw new Error('omnibuf: WireArray(array) trailing bytes');
+      return prev;
+    }
+    case WireMap: {
+      let p = startP;
+      for (let i = 0; i < count; i++) {
+        const [nestedBody, nextP] = readLenSlice(body, p, 3);
+        prev.push(decodeMapBodyBlind({}, nestedBody, childSchema, depth + 1, options));
+        p = nextP;
+      }
+      if (p !== body.length) throw new Error('omnibuf: WireArray(map) trailing bytes');
+      return prev;
+    }
+    case WireExtended: {
+      const p = startP;
+      if (count > 0) {
+        const [extBody] = readLenSlice(body, p, 1);
+        throw new Error(
+          `omnibuf: unrecognized WireExtended subtype 0x${extBody[0]!.toString(16).padStart(2, '0')}`,
+        );
+      }
+      if (p !== body.length) throw new Error('omnibuf: WireArray(extended) trailing bytes');
+      return prev;
+    }
+    default:
+      throw new Error(`omnibuf: unsupported WireArray element type ${elemType}`);
+  }
+}
+
+function decodeMapBodyBlind(
+  m: Record<string, unknown>,
+  body: Uint8Array,
+  childSchema: SchemaMeta | null,
+  depth: number,
+  options: DecodeBlindOptions,
+): Record<string, unknown> {
+  if (depth > MaxNestingDepth) {
+    throw new Error(`omnibuf: nesting depth ${depth} exceeds MaxNestingDepth (${MaxNestingDepth})`);
+  }
+  const keyWT = body[0]!;
+  const valWT = body[1]!;
+  validateMapTypes(keyWT, valWT);
+  const [count, cn] = decodeVarintBigInt(body, 2);
+  if (cn === 0 || count > BigInt(Math.floor((body.length - (2 + cn)) / 2))) {
+    throw new Error(`omnibuf: WireMap count ${count} exceeds body (${body.length} B)`);
+  }
+  let p = 2 + cn;
+  const c = Number(count);
+  for (let i = 0; i < c; i++) {
+    const [k, nextP] = decodeMapKeyBlind(body, p, keyWT);
+    const [v, nextP2] = decodeMapValBlind(body, nextP, valWT, childSchema, depth, options);
+    p = nextP2;
+    setOwn(m, k, v);
+  }
+  if (p !== body.length) {
+    throw new Error(`omnibuf: WireMap trailing bytes (parsed ${p}, body ${body.length})`);
+  }
+  return m;
 }
 
 function decodeMapKeyBlind(
@@ -687,6 +872,13 @@ function decodeMapKeyBlind(
         (body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 0;
       return [u32.toString(), p + 4];
     }
+    case WireSfixed32: {
+      if (body.length - p < 4) {
+        throw new Error(`omnibuf: truncated WireMap sfixed32 key at ${p}`);
+      }
+      const i32 = body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24) | 0;
+      return [i32.toString(), p + 4];
+    }
     case WireFixed64: {
       if (body.length - p < 8) {
         throw new Error(`omnibuf: truncated WireMap fixed64 key at ${p}`);
@@ -697,7 +889,17 @@ function decodeMapKeyBlind(
       }
       return [u64.toString(), p + 8];
     }
-    case WireBoolTrue:
+    case WireSfixed64: {
+      if (body.length - p < 8) {
+        throw new Error(`omnibuf: truncated WireMap sfixed64 key at ${p}`);
+      }
+      let u64 = 0n;
+      for (let b = 7; b >= 0; b--) {
+        u64 = (u64 << 8n) | BigInt(body[p + b]!);
+      }
+      const s64 = BigInt.asIntN(64, u64);
+      return [s64.toString(), p + 8];
+    }
     case WireBoolFalse: {
       if (body.length - p < 1) {
         throw new Error(`omnibuf: truncated WireMap bool key at ${p}`);
@@ -753,6 +955,21 @@ function decodeMapValBlind(
       if (body.length - p < 4) {
         throw new Error(`omnibuf: truncated WireMap fixed32 value at ${p}`);
       }
+      const u32 =
+        (body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 0;
+      return [u32, p + 4];
+    }
+    case WireSfixed32: {
+      if (body.length - p < 4) {
+        throw new Error(`omnibuf: truncated WireMap sfixed32 value at ${p}`);
+      }
+      const i32 = body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24) | 0;
+      return [i32, p + 4];
+    }
+    case WireFloat32: {
+      if (body.length - p < 4) {
+        throw new Error(`omnibuf: truncated WireMap float32 value at ${p}`);
+      }
       const bits =
         (body[p]! | (body[p + 1]! << 8) | (body[p + 2]! << 16) | (body[p + 3]! << 24)) >>> 0;
       const f32 = float32FromBits(bits);
@@ -766,9 +983,29 @@ function decodeMapValBlind(
       for (let b = 7; b >= 0; b--) {
         u64 = (u64 << 8n) | BigInt(body[p + b]!);
       }
+      return [u64 <= 9007199254740991n ? Number(u64) : u64, p + 8];
+    }
+    case WireSfixed64: {
+      if (body.length - p < 8) {
+        throw new Error(`omnibuf: truncated WireMap sfixed64 value at ${p}`);
+      }
+      let u64 = 0n;
+      for (let b = 7; b >= 0; b--) {
+        u64 = (u64 << 8n) | BigInt(body[p + b]!);
+      }
+      const s64 = BigInt.asIntN(64, u64);
+      return [s64 >= -9007199254740991n && s64 <= 9007199254740991n ? Number(s64) : s64, p + 8];
+    }
+    case WireFloat64: {
+      if (body.length - p < 8) {
+        throw new Error(`omnibuf: truncated WireMap float64 value at ${p}`);
+      }
+      let u64 = 0n;
+      for (let b = 7; b >= 0; b--) {
+        u64 = (u64 << 8n) | BigInt(body[p + b]!);
+      }
       return [float64FromBits(u64), p + 8];
     }
-    case WireBoolTrue:
     case WireBoolFalse: {
       if (body.length - p < 1) {
         throw new Error(`omnibuf: truncated WireMap bool value at ${p}`);
@@ -778,6 +1015,22 @@ function decodeMapValBlind(
         throw new Error(`omnibuf: invalid WireMap bool value ${b} at ${p}`);
       }
       return [b === 1, p + 1];
+    }
+    case WireArray: {
+      const [arrBody, nextP] = readLenSlice(body, p, 2);
+      const arr = decodeArrayBodyBlind([], arrBody, childSchema, depth + 1, options);
+      return [arr, nextP];
+    }
+    case WireMap: {
+      const [mapBody, nextP] = readLenSlice(body, p, 3);
+      const mapObj = decodeMapBodyBlind({}, mapBody, childSchema, depth + 1, options);
+      return [mapObj, nextP];
+    }
+    case WireExtended: {
+      const [extBody] = readLenSlice(body, p, 1);
+      throw new Error(
+        `omnibuf: unrecognized WireExtended subtype 0x${extBody[0]!.toString(16).padStart(2, '0')}`,
+      );
     }
     default:
       throw new Error(`omnibuf: invalid WireMap value wire type ${valWT}`);

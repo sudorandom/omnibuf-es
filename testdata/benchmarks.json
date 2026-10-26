@@ -1,0 +1,159 @@
+{
+  "runtime": "Node.js v24.22.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M1 Pro",
+  "workload": "PeerUpdate",
+  "categories": [
+    {
+      "id": "encode",
+      "title": "Full Message Encode Speed (PeerUpdate)",
+      "results": [
+        {
+          "name": "OmniBuf",
+          "nsPerOp": 1169,
+          "opsPerSec": 855686,
+          "wireBytes": 366
+        },
+        {
+          "name": "protobufjs",
+          "nsPerOp": 1653,
+          "opsPerSec": 604858,
+          "wireBytes": 350
+        },
+        {
+          "name": "@bufbuild/protobuf (protobuf-es)",
+          "nsPerOp": 2706,
+          "opsPerSec": 369601,
+          "wireBytes": 350
+        },
+        {
+          "name": "google-protobuf",
+          "nsPerOp": 5863,
+          "opsPerSec": 170553,
+          "wireBytes": 350
+        },
+        {
+          "name": "@msgpack/msgpack",
+          "nsPerOp": 4042,
+          "opsPerSec": 247391,
+          "wireBytes": 622
+        },
+        {
+          "name": "JSON",
+          "nsPerOp": 2320,
+          "opsPerSec": 430946,
+          "wireBytes": 791
+        }
+      ]
+    },
+    {
+      "id": "decode",
+      "title": "Full Message Decode Speed (PeerUpdate)",
+      "results": [
+        {
+          "name": "OmniBuf",
+          "nsPerOp": 1090,
+          "opsPerSec": 917408
+        },
+        {
+          "name": "protobufjs",
+          "nsPerOp": 1537,
+          "opsPerSec": 650771
+        },
+        {
+          "name": "@bufbuild/protobuf (protobuf-es)",
+          "nsPerOp": 3780,
+          "opsPerSec": 264582
+        },
+        {
+          "name": "google-protobuf",
+          "nsPerOp": 3390,
+          "opsPerSec": 295025
+        },
+        {
+          "name": "@msgpack/msgpack",
+          "nsPerOp": 3599,
+          "opsPerSec": 277843
+        },
+        {
+          "name": "JSON",
+          "nsPerOp": 2335,
+          "opsPerSec": 428243
+        }
+      ]
+    },
+    {
+      "id": "lookup_city",
+      "title": "Read a Single Nested Field (peer.location.city)",
+      "results": [
+        {
+          "name": "OmniBuf",
+          "nsPerOp": 389,
+          "opsPerSec": 2568985
+        },
+        {
+          "name": "protobufjs",
+          "nsPerOp": 1533,
+          "opsPerSec": 652421
+        },
+        {
+          "name": "@bufbuild/protobuf (protobuf-es)",
+          "nsPerOp": 3762,
+          "opsPerSec": 265825
+        },
+        {
+          "name": "google-protobuf",
+          "nsPerOp": 3385,
+          "opsPerSec": 295379
+        },
+        {
+          "name": "@msgpack/msgpack",
+          "nsPerOp": 3591,
+          "opsPerSec": 278440
+        },
+        {
+          "name": "JSON",
+          "nsPerOp": 2348,
+          "opsPerSec": 425901
+        }
+      ]
+    },
+    {
+      "id": "mutate_sequence",
+      "title": "Selective Single-Field Mutation (update peer.sequence & re-serialize)",
+      "results": [
+        {
+          "name": "OmniBuf",
+          "nsPerOp": 533,
+          "opsPerSec": 1875474
+        },
+        {
+          "name": "protobufjs",
+          "nsPerOp": 3734,
+          "opsPerSec": 267791
+        },
+        {
+          "name": "@bufbuild/protobuf (protobuf-es)",
+          "nsPerOp": 6952,
+          "opsPerSec": 143845
+        },
+        {
+          "name": "google-protobuf",
+          "nsPerOp": 9492,
+          "opsPerSec": 105351
+        },
+        {
+          "name": "@msgpack/msgpack",
+          "nsPerOp": 7706,
+          "opsPerSec": 129761
+        },
+        {
+          "name": "JSON",
+          "nsPerOp": 4773,
+          "opsPerSec": 209496
+        }
+      ]
+    }
+  ]
+}

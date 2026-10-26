@@ -4,33 +4,29 @@
 
 import {
   MaxNestingDepth,
+  WireArray,
   WireBoolFalse,
   WireBoolTrue,
   WireBytes,
   WireFixed32,
   WireFixed64,
-  WireFixedArr,
+  WireFloat32,
+  WireFloat64,
   WireMap,
+  WireSfixed32,
+  WireSfixed64,
   WireSint,
-  WireSintArr,
   WireString,
-  WireStringArr,
   WireSubMsg,
-  WireSubMsgArr,
   WireUint,
-  WireUintArr,
   encodeZigZag,
   encodeZigZagNumber,
   getStringCodec,
+  mapHeaderByte,
   writeVarintAt,
 } from './wire.js';
 
-/**
- * Encodes the 1-byte WireMap type header: `(KeyWireType << 4) | ValWireType`.
- */
-export function mapHeaderByte(keyWT: number, valWT: number): number {
-  return ((keyWT & 0x0f) << 4) | (valWT & 0x0f);
-}
+export { mapHeaderByte };
 
 /**
  * Encoder encodes OmniBuf messages into a reusable contiguous byte buffer in a single forward pass.
@@ -40,6 +36,7 @@ export class Encoder {
   private view: DataView;
   private pos = 0;
   private readonly lenStack = new Int32Array(MaxNestingDepth * 2 + 8);
+  private readonly elemCountStack = new Int32Array(MaxNestingDepth * 2 + 8);
   private depth = 0;
 
   constructor(initialCapacity = 512) {
@@ -292,7 +289,7 @@ export class Encoder {
    * Writes a field tag `(fieldNum << 4) | wireType` as a Prefix-Varint.
    */
   writeTag(fieldNum: number, wireType: number): void {
-    if (!Number.isInteger(fieldNum) || fieldNum < 0 || fieldNum > 0xffffffff) {
+    if (!Number.isInteger(fieldNum) || fieldNum < 0 || fieldNum > 536870911) {
       throw new Error(`omnibuf: invalid field number ${fieldNum}`);
     }
     const tag = fieldNum * 16 + (wireType & 0x0f);
@@ -309,6 +306,37 @@ export class Encoder {
       return;
     }
     this.writeRawVarint(tag);
+  }
+
+  private patchReservedVarint(pos: number, v: number): void {
+    if (v <= 127) {
+      this.buf[pos] = ((v << 1) | 1) & 0xff;
+      return;
+    }
+    if (v <= 16383) {
+      this.ensureCapacity(1);
+      this.buf.copyWithin(pos + 2, pos + 1, this.pos);
+      const u16 = ((v << 2) | 2) & 0xffff;
+      this.buf[pos] = u16 & 0xff;
+      this.buf[pos + 1] = (u16 >>> 8) & 0xff;
+      this.pos += 1;
+      return;
+    }
+    if (v <= 536870911) {
+      this.ensureCapacity(3);
+      this.buf.copyWithin(pos + 4, pos + 1, this.pos);
+      const w32 = ((v << 3) | 4) >>> 0;
+      this.buf[pos] = w32 & 0xff;
+      this.buf[pos + 1] = (w32 >>> 8) & 0xff;
+      this.buf[pos + 2] = (w32 >>> 16) & 0xff;
+      this.buf[pos + 3] = (w32 >>> 24) & 0xff;
+      this.pos += 3;
+      return;
+    }
+    this.ensureCapacity(8);
+    this.buf.copyWithin(pos + 9, pos + 1, this.pos);
+    writeVarintAt(this.buf, pos, BigInt(v));
+    this.pos += 8;
   }
 
   /**
@@ -476,7 +504,7 @@ export class Encoder {
   }
 
   /**
-   * Writes a 4-byte little-endian uint32/int32 field (`WireFixed32 = 10`).
+   * Writes a 4-byte little-endian uint32 field (`WireFixed32 = 4`).
    */
   writeFixed32(fieldNum: number, v: number): void {
     this.writeTag(fieldNum, WireFixed32);
@@ -484,24 +512,32 @@ export class Encoder {
   }
 
   /**
-   * Writes a 4-byte IEEE-754 float32 field (`WireFixed32 = 10`).
+   * Writes a 4-byte little-endian int32 field (`WireSfixed32 = 6`).
+   */
+  writeSfixed32(fieldNum: number, v: number): void {
+    this.writeTag(fieldNum, WireSfixed32);
+    this.writeRawFixed32(v);
+  }
+
+  /**
+   * Writes a 4-byte IEEE-754 float32 field (`WireFloat32 = 8`).
    */
   writeFloat32(fieldNum: number, v: number): void {
     if (fieldNum >= 1 && fieldNum <= 7) {
       if (this.pos + 5 > this.buf.length) {
         this.ensureCapacity(5);
       }
-      this.buf[this.pos++] = (((fieldNum << 4) | WireFixed32) << 1) | 1;
+      this.buf[this.pos++] = (((fieldNum << 4) | WireFloat32) << 1) | 1;
       this.view.setFloat32(this.pos, v, true);
       this.pos += 4;
       return;
     }
-    this.writeTag(fieldNum, WireFixed32);
+    this.writeTag(fieldNum, WireFloat32);
     this.writeRawFloat32(v);
   }
 
   /**
-   * Writes an 8-byte little-endian uint64/int64 field (`WireFixed64 = 11`).
+   * Writes an 8-byte little-endian uint64 field (`WireFixed64 = 5`).
    */
   writeFixed64(fieldNum: number, v: number | bigint): void {
     this.writeTag(fieldNum, WireFixed64);
@@ -509,24 +545,32 @@ export class Encoder {
   }
 
   /**
-   * Writes an 8-byte IEEE-754 float64 field (`WireFixed64 = 11`).
+   * Writes an 8-byte little-endian int64 field (`WireSfixed64 = 7`).
+   */
+  writeSfixed64(fieldNum: number, v: number | bigint): void {
+    this.writeTag(fieldNum, WireSfixed64);
+    this.writeRawFixed64(v);
+  }
+
+  /**
+   * Writes an 8-byte IEEE-754 float64 field (`WireFloat64 = 9`).
    */
   writeFloat64(fieldNum: number, v: number): void {
     if (fieldNum >= 1 && fieldNum <= 7) {
       if (this.pos + 9 > this.buf.length) {
         this.ensureCapacity(9);
       }
-      this.buf[this.pos++] = (((fieldNum << 4) | WireFixed64) << 1) | 1;
+      this.buf[this.pos++] = (((fieldNum << 4) | WireFloat64) << 1) | 1;
       this.view.setFloat64(this.pos, v, true);
       this.pos += 8;
       return;
     }
-    this.writeTag(fieldNum, WireFixed64);
+    this.writeTag(fieldNum, WireFloat64);
     this.writeRawFloat64(v);
   }
 
   /**
-   * Writes a UTF-8 string field (`WireString = 3`).
+   * Writes a UTF-8 string field (`WireString = 10`).
    */
   writeString(fieldNum: number, s: string): void {
     this.writeTag(fieldNum, WireString);
@@ -534,7 +578,7 @@ export class Encoder {
   }
 
   /**
-   * Writes a raw byte slice field (`WireBytes = 4`).
+   * Writes a raw byte slice field (`WireBytes = 11`).
    */
   writeBytes(fieldNum: number, b: Uint8Array): void {
     this.writeTag(fieldNum, WireBytes);
@@ -542,15 +586,16 @@ export class Encoder {
   }
 
   // ==========================================================================
-  // Packed & Length-Prefixed Array Writers
+  // Composable Array Writers (WireArray = 13)
   // ==========================================================================
 
   /**
-   * Writes a repeated string array (`WireStringArr = 6`) with an outer backpatched 2B length prefix.
+   * Writes a repeated string array (`WireArray = 13`, `ElementType = WireString = 10`) with an outer backpatched 2B length prefix.
    */
   writeStringArr(fieldNum: number, items: readonly string[]): void {
-    this.writeTag(fieldNum, WireStringArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.writeByte(WireString);
     this.writeRawVarint(items.length);
     for (let i = 0; i < items.length; i++) {
       this.writeRawStringPayload(items[i]!);
@@ -559,11 +604,12 @@ export class Encoder {
   }
 
   /**
-   * Writes a repeated bytes array (`WireStringArr = 6`) with an outer backpatched 2B length prefix.
+   * Writes a repeated bytes array (`WireArray = 13`, `ElementType = WireBytes = 11`) with an outer backpatched 2B length prefix.
    */
   writeBytesArr(fieldNum: number, items: readonly Uint8Array[]): void {
-    this.writeTag(fieldNum, WireStringArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.writeByte(WireBytes);
     this.writeRawVarint(items.length);
     for (let i = 0; i < items.length; i++) {
       this.writeRawBytesPayload(items[i]!);
@@ -572,11 +618,12 @@ export class Encoder {
   }
 
   /**
-   * Writes a packed unsigned integer array (`WireUintArr = 7`) with an outer backpatched 2B length prefix.
+   * Writes a packed unsigned integer array (`WireArray = 13`, `ElementType = WireUint = 0`) with an outer backpatched 2B length prefix.
    */
   writeUint32Arr(fieldNum: number, items: ArrayLike<number>): void {
-    this.writeTag(fieldNum, WireUintArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.writeByte(WireUint);
     this.writeRawVarint(items.length);
     for (let i = 0; i < items.length; i++) {
       this.writeRawVarint(items[i]! >>> 0);
@@ -585,11 +632,12 @@ export class Encoder {
   }
 
   /**
-   * Writes a packed unsigned integer array (`WireUintArr = 7`) supporting `number | bigint` elements.
+   * Writes a packed unsigned integer array (`WireArray = 13`, `ElementType = WireUint = 0`) supporting `number | bigint` elements.
    */
   writeUintArr(fieldNum: number, items: ArrayLike<number | bigint>): void {
-    this.writeTag(fieldNum, WireUintArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.writeByte(WireUint);
     this.writeRawVarint(items.length);
     for (let i = 0; i < items.length; i++) {
       const v = items[i]!;
@@ -599,24 +647,27 @@ export class Encoder {
   }
 
   /**
-   * Writes a packed boolean array (`WireUintArr = 7`) with 0/1 Prefix-Varint elements.
+   * Writes a packed boolean array (`WireArray = 13`, `ElementType = WireBoolFalse = 2`) with 1-byte `0x00`/`0x01` elements.
    */
   writeBoolArr(fieldNum: number, items: readonly boolean[]): void {
-    this.writeTag(fieldNum, WireUintArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.writeByte(WireBoolFalse);
     this.writeRawVarint(items.length);
+    this.ensureCapacity(items.length);
     for (let i = 0; i < items.length; i++) {
-      this.writeRawVarint(items[i] ? 1 : 0);
+      this.buf[this.pos++] = items[i] ? 1 : 0;
     }
     this.endContainer();
   }
 
   /**
-   * Writes a packed ZigZag signed integer array (`WireSintArr = 13`) with an outer backpatched 2B length prefix.
+   * Writes a packed ZigZag signed integer array (`WireArray = 13`, `ElementType = WireSint = 1`) with an outer backpatched 2B length prefix.
    */
   writeSintArr(fieldNum: number, items: ArrayLike<number | bigint>): void {
-    this.writeTag(fieldNum, WireSintArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.writeByte(WireSint);
     this.writeRawVarint(items.length);
     for (let i = 0; i < items.length; i++) {
       const v = items[i]!;
@@ -626,57 +677,77 @@ export class Encoder {
   }
 
   /**
-   * Writes a packed float32 array (`WireFixedArr = 14`, `ElemType = WireFixed32`).
-   * Note: because fixed-width element byte count is known upfront (`1 + len * 4`),
-   * uses minimal Prefix-Varint length matching Go's `encodeFixed32Arr`.
+   * Writes a packed float32 array (`WireArray = 13`, `ElementType = WireFloat32 = 8`).
    */
   writeFloat32Arr(fieldNum: number, items: ArrayLike<number>): void {
-    this.writeTag(fieldNum, WireFixedArr);
-    this.writeRawVarint(1 + items.length * 4);
-    this.writeByte(WireFixed32);
+    this.writeTag(fieldNum, WireArray);
+    this.beginContainer();
+    this.writeByte(WireFloat32);
+    this.writeRawVarint(items.length);
     this.ensureCapacity(items.length * 4);
     for (let i = 0; i < items.length; i++) {
       this.view.setFloat32(this.pos, items[i]!, true);
       this.pos += 4;
     }
+    this.endContainer();
   }
 
   /**
-   * Writes a packed fixed32/sfixed32 array (`WireFixedArr = 14`, `ElemType = WireFixed32`).
+   * Writes a packed fixed32 array (`WireArray = 13`, `ElementType = WireFixed32 = 4`).
    */
   writeFixed32Arr(fieldNum: number, items: ArrayLike<number>): void {
-    this.writeTag(fieldNum, WireFixedArr);
-    this.writeRawVarint(1 + items.length * 4);
+    this.writeTag(fieldNum, WireArray);
+    this.beginContainer();
     this.writeByte(WireFixed32);
+    this.writeRawVarint(items.length);
     this.ensureCapacity(items.length * 4);
     for (let i = 0; i < items.length; i++) {
       this.view.setUint32(this.pos, items[i]! >>> 0, true);
       this.pos += 4;
     }
+    this.endContainer();
   }
 
   /**
-   * Writes a packed float64 array (`WireFixedArr = 14`, `ElemType = WireFixed64`).
-   * Uses minimal Prefix-Varint length (`1 + len * 8`) matching Go's `encodeFixed64Arr`.
+   * Writes a packed sfixed32 array (`WireArray = 13`, `ElementType = WireSfixed32 = 6`).
+   */
+  writeSfixed32Arr(fieldNum: number, items: ArrayLike<number>): void {
+    this.writeTag(fieldNum, WireArray);
+    this.beginContainer();
+    this.writeByte(WireSfixed32);
+    this.writeRawVarint(items.length);
+    this.ensureCapacity(items.length * 4);
+    for (let i = 0; i < items.length; i++) {
+      this.view.setUint32(this.pos, items[i]! >>> 0, true);
+      this.pos += 4;
+    }
+    this.endContainer();
+  }
+
+  /**
+   * Writes a packed float64 array (`WireArray = 13`, `ElementType = WireFloat64 = 9`).
    */
   writeFloat64Arr(fieldNum: number, items: ArrayLike<number>): void {
-    this.writeTag(fieldNum, WireFixedArr);
-    this.writeRawVarint(1 + items.length * 8);
-    this.writeByte(WireFixed64);
+    this.writeTag(fieldNum, WireArray);
+    this.beginContainer();
+    this.writeByte(WireFloat64);
+    this.writeRawVarint(items.length);
     this.ensureCapacity(items.length * 8);
     for (let i = 0; i < items.length; i++) {
       this.view.setFloat64(this.pos, items[i]!, true);
       this.pos += 8;
     }
+    this.endContainer();
   }
 
   /**
-   * Writes a packed fixed64/sfixed64 array (`WireFixedArr = 14`, `ElemType = WireFixed64`).
+   * Writes a packed fixed64 array (`WireArray = 13`, `ElementType = WireFixed64 = 5`).
    */
   writeFixed64Arr(fieldNum: number, items: ArrayLike<number | bigint>): void {
-    this.writeTag(fieldNum, WireFixedArr);
-    this.writeRawVarint(1 + items.length * 8);
+    this.writeTag(fieldNum, WireArray);
+    this.beginContainer();
     this.writeByte(WireFixed64);
+    this.writeRawVarint(items.length);
     this.ensureCapacity(items.length * 8);
     for (let i = 0; i < items.length; i++) {
       const v = items[i]!;
@@ -685,6 +756,26 @@ export class Encoder {
       this.view.setBigUint64(this.pos, u, true);
       this.pos += 8;
     }
+    this.endContainer();
+  }
+
+  /**
+   * Writes a packed sfixed64 array (`WireArray = 13`, `ElementType = WireSfixed64 = 7`).
+   */
+  writeSfixed64Arr(fieldNum: number, items: ArrayLike<number | bigint>): void {
+    this.writeTag(fieldNum, WireArray);
+    this.beginContainer();
+    this.writeByte(WireSfixed64);
+    this.writeRawVarint(items.length);
+    this.ensureCapacity(items.length * 8);
+    for (let i = 0; i < items.length; i++) {
+      const v = items[i]!;
+      const u =
+        typeof v === 'bigint' ? BigInt.asUintN(64, v) : BigInt.asUintN(64, BigInt(Math.trunc(v)));
+      this.view.setBigUint64(this.pos, u, true);
+      this.pos += 8;
+    }
+    this.endContainer();
   }
 
   // ==========================================================================
@@ -692,7 +783,7 @@ export class Encoder {
   // ==========================================================================
 
   /**
-   * Starts a nested sub-message (`WireSubMsg = 5`) in a single pass by reserving a 2-byte length slot.
+   * Starts a nested sub-message (`WireSubMsg = 12`) in a single pass by reserving a 2-byte length slot.
    */
   beginSubMsg(fieldNum: number): void {
     this.writeTag(fieldNum, WireSubMsg);
@@ -707,40 +798,49 @@ export class Encoder {
   }
 
   /**
-   * Starts a repeated sub-message array (`WireSubMsgArr = 8`) in a single pass.
+   * Starts a repeated sub-message array (`WireArray = 13`, `ElementType = WireSubMsg = 12`) in a single pass.
    */
   beginSubMsgArr(fieldNum: number): void {
-    this.writeTag(fieldNum, WireSubMsgArr);
+    this.writeTag(fieldNum, WireArray);
     this.beginContainer();
+    this.elemCountStack[this.depth - 1] = 0;
+    this.writeByte(WireSubMsg);
+    this.writeByte(0x01); // 1-byte Prefix-Varint(0) count slot at lenPos + 3
   }
 
   /**
-   * Starts the next element inside an open `WireSubMsgArr` by reserving its 2-byte length prefix.
+   * Starts the next element inside an open `WireArray(WireSubMsg)` by reserving its 2-byte length prefix.
    */
   beginSubMsgElem(): void {
+    if (this.depth > 0) {
+      this.elemCountStack[this.depth - 1]!++;
+    }
     this.beginContainer();
   }
 
   /**
-   * Finishes the current element inside an open `WireSubMsgArr` and backpatches its length.
+   * Finishes the current element inside an open `WireArray(WireSubMsg)` and backpatches its length.
    */
   endSubMsgElem(): void {
     this.endContainer();
   }
 
   /**
-   * Finishes the open `WireSubMsgArr` and backpatches its total byte length.
+   * Finishes the open `WireArray(WireSubMsg)` and backpatches its element count and total byte length.
    */
   endSubMsgArr(): void {
+    const lenPos = this.lenStack[this.depth - 1]!;
+    const count = this.elemCountStack[this.depth - 1]!;
+    this.patchReservedVarint(lenPos + 3, count);
     this.endContainer();
   }
 
   // ==========================================================================
-  // Map Writers (WireMap = 9)
+  // Map Writers (WireMap = 14)
   // ==========================================================================
 
   /**
-   * Writes a `map<string, uint64>` (`WireMap = 9`) in a single pass.
+   * Writes a `map<string, uint64>` (`WireMap = 14`) in a single pass.
    */
   writeMapStringUint(
     fieldNum: number,
@@ -749,7 +849,8 @@ export class Encoder {
   ): void {
     this.writeTag(fieldNum, WireMap);
     this.beginContainer();
-    this.writeByte(mapHeaderByte(WireString, WireUint));
+    this.writeByte(WireString);
+    this.writeByte(WireUint);
 
     const entries: [string, number | bigint][] =
       m instanceof Map ? Array.from(m.entries()) : Object.entries(m);

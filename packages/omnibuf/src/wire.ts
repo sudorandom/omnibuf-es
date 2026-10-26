@@ -6,45 +6,173 @@
  * Explicit 4-bit Wire Types (0..15) encoded in the low 4 bits of the field tag:
  * Tag = (FieldNumber << 4) | WireType
  */
-export const WireUint = 0 as const; // [Prefix-Varint] (unsigned int: uint32, uint64, enum)
-export const WireBoolFalse = 1 as const; // 0 value bytes (false encoded directly in tag)
-export const WireBoolTrue = 2 as const; // 0 value bytes (true encoded directly in tag)
-export const WireString = 3 as const; // [ByteLen (Prefix-Varint)][UTF-8 Bytes]
-export const WireBytes = 4 as const; // [ByteLen (Prefix-Varint)][Raw Bytes]
-export const WireSubMsg = 5 as const; // [ByteLen (Prefix-Varint)][Sub-Packet Bytes]
-export const WireStringArr = 6 as const; // [ByteLen (Prefix-Varint)][Count (Prefix-Varint)][Len + UTF-8 Bytes]...
-export const WireUintArr = 7 as const; // [ByteLen (Prefix-Varint)][Count (Prefix-Varint)][Prefix-Varint]...
-export const WireSubMsgArr = 8 as const; // [ByteLen (Prefix-Varint)][ElemLen (Prefix-Varint) + Elem Bytes]...
-export const WireMap = 9 as const; // [ByteLen (Prefix-Varint)][MapType (1B: KeyWT<<4|ValWT)][Count (Prefix-Varint)][Key + Value]...
-export const WireFixed32 = 10 as const; // [4 Bytes Little-Endian] (float32 / fixed32 / sfixed32)
-export const WireFixed64 = 11 as const; // [8 Bytes Little-Endian] (float64 / fixed64 / sfixed64)
-export const WireSint = 12 as const; // [Prefix-Varint] (ZigZag signed int: int32, int64, sint32, sint64)
-export const WireSintArr = 13 as const; // [ByteLen (Prefix-Varint)][Count (Prefix-Varint)][ZigZag Prefix-Varint]...
-export const WireFixedArr = 14 as const; // [ByteLen (Prefix-Varint)][ElemType (1B: WireFixed32=10 or WireFixed64=11)][Fixed Elements...]
-export const WireExtended = 15 as const; // [ByteLen (Prefix-Varint)][ExtType (1B: 0..255)][Extended Payload...] (Reserved escape hatch)
+export const WireUint = 0 as const; // [Prefix-Varint] (unsigned int: uint32, uint64)
+export const WireSint = 1 as const; // [Prefix-Varint] (ZigZag signed int: int32, int64, sint32, sint64, enum)
+export const WireBoolFalse = 2 as const; // 0 value bytes in field tags; in WireArray/WireMap headers, bool element/key/value type (1 raw byte 0x00 or 0x01)
+export const WireBoolTrue = 3 as const; // 0 value bytes in field tags (true encoded directly in tag); invalid in WireArray/WireMap headers
+export const WireFixed32 = 4 as const; // [4 Bytes Little-Endian] (uint32 / fixed32)
+export const WireFixed64 = 5 as const; // [8 Bytes Little-Endian] (uint64 / fixed64)
+export const WireSfixed32 = 6 as const; // [4 Bytes Little-Endian] (int32 / sfixed32)
+export const WireSfixed64 = 7 as const; // [8 Bytes Little-Endian] (int64 / sfixed64)
+export const WireFloat32 = 8 as const; // [4 Bytes Little-Endian] (IEEE-754 float32 / float)
+export const WireFloat64 = 9 as const; // [8 Bytes Little-Endian] (IEEE-754 float64 / double)
+export const WireString = 10 as const; // [ByteLen (Prefix-Varint)][UTF-8 Bytes]
+export const WireBytes = 11 as const; // [ByteLen (Prefix-Varint)][Raw Bytes]
+export const WireSubMsg = 12 as const; // [ByteLen (Prefix-Varint)][Sub-Packet Bytes]
+export const WireArray = 13 as const; // [ByteLen (Prefix-Varint)][ElementType (1B)][Count (Prefix-Varint)][Elements...]
+export const WireMap = 14 as const; // [ByteLen (Prefix-Varint)][KeyType (1B)][ValueType (1B)][Count (Prefix-Varint)][Key + Value]...
+export const WireExtended = 15 as const; // [ByteLen (Prefix-Varint)][ExtType (1B: 0..255)][Extended Payload...]
 
 export type WireType =
   | typeof WireUint
+  | typeof WireSint
   | typeof WireBoolFalse
   | typeof WireBoolTrue
+  | typeof WireFixed32
+  | typeof WireFixed64
+  | typeof WireSfixed32
+  | typeof WireSfixed64
+  | typeof WireFloat32
+  | typeof WireFloat64
   | typeof WireString
   | typeof WireBytes
   | typeof WireSubMsg
-  | typeof WireStringArr
-  | typeof WireUintArr
-  | typeof WireSubMsgArr
+  | typeof WireArray
   | typeof WireMap
-  | typeof WireFixed32
-  | typeof WireFixed64
-  | typeof WireSint
-  | typeof WireSintArr
-  | typeof WireFixedArr
   | typeof WireExtended;
 
 /**
  * Maximum allowed sub-message / array nesting depth (prevents stack-overflow bombs).
  */
 export const MaxNestingDepth = 32;
+
+/**
+ * Packs a 4-bit key wire type and 4-bit value wire type into a byte (legacy helper).
+ */
+export function mapHeaderByte(keyType: number, valType: number): number {
+  return ((keyType & 0x0f) << 4) | (valType & 0x0f);
+}
+
+/**
+ * Parses and validates the `[ElementType (1B)][Count (Prefix-Varint)]` header at the start of a
+ * `WireArray` body. Returns `[elemType, count, pos, ok]`.
+ */
+export function parseArrayHeader(
+  body: Uint8Array,
+  start = 0,
+  end = body.length,
+): [elemType: number, count: number, pos: number, ok: boolean] {
+  if (end - start < 2) {
+    return [0, 0, 0, false];
+  }
+  const elemType = body[start]!;
+  if (elemType > WireExtended || elemType === WireBoolTrue) {
+    return [0, 0, 0, false];
+  }
+  let countNum = 0;
+  let cn = 0;
+  const cb = body[start + 1]!;
+  if ((cb & 1) !== 0) {
+    countNum = cb >>> 1;
+    cn = 1;
+  } else if ((cb & 2) !== 0) {
+    if (start + 3 > end) {
+      return [0, 0, 0, false];
+    }
+    countNum = (cb | (body[start + 2]! << 8)) >>> 2;
+    cn = 2;
+  } else {
+    const [count64, cBytes] = decodeVarintBigInt(body, start + 1);
+    if (cBytes === 0 || count64 > BigInt(end - (start + 1 + cBytes))) {
+      return [0, 0, 0, false];
+    }
+    countNum = Number(count64);
+    cn = cBytes;
+  }
+  const pos = start + 1 + cn;
+  if (pos > end) {
+    return [0, 0, 0, false];
+  }
+  const remaining = end - pos;
+  let width = 0;
+  switch (elemType) {
+    case WireBoolFalse:
+      width = 1;
+      break;
+    case WireFixed32:
+    case WireFloat32:
+    case WireSfixed32:
+      width = 4;
+      break;
+    case WireFixed64:
+    case WireFloat64:
+    case WireSfixed64:
+      width = 8;
+      break;
+  }
+  if (width > 0) {
+    if (remaining % width !== 0 || countNum !== remaining / width) {
+      return [0, 0, 0, false];
+    }
+  } else if (countNum > remaining) {
+    return [0, 0, 0, false];
+  }
+  return [elemType, countNum, pos, true];
+}
+
+/**
+ * Parses and validates the `[KeyType (1B)][ValueType (1B)][Count (Prefix-Varint)]` header
+ * at the start of a `WireMap` body. Returns `[keyWT, valWT, count, pos, ok]`.
+ */
+export function parseMapHeader(
+  body: Uint8Array,
+  start = 0,
+  end = body.length,
+): [keyWT: number, valWT: number, count: number, pos: number, ok: boolean] {
+  if (end - start < 3) {
+    return [0, 0, 0, 0, false];
+  }
+  const keyWT = body[start]!;
+  const valWT = body[start + 1]!;
+  const validKey =
+    keyWT === WireUint ||
+    keyWT === WireSint ||
+    keyWT === WireBoolFalse ||
+    keyWT === WireFixed32 ||
+    keyWT === WireFixed64 ||
+    keyWT === WireSfixed32 ||
+    keyWT === WireSfixed64 ||
+    keyWT === WireString;
+  const validVal = valWT <= WireExtended && valWT !== WireBoolTrue;
+  if (!validKey || !validVal) {
+    return [0, 0, 0, 0, false];
+  }
+  let countNum = 0;
+  let cn = 0;
+  const cb = body[start + 2]!;
+  if ((cb & 1) !== 0) {
+    countNum = cb >>> 1;
+    cn = 1;
+  } else if ((cb & 2) !== 0) {
+    if (start + 4 > end) {
+      return [0, 0, 0, 0, false];
+    }
+    countNum = (cb | (body[start + 3]! << 8)) >>> 2;
+    cn = 2;
+  } else {
+    const [count64, cBytes] = decodeVarintBigInt(body, start + 2);
+    if (cBytes === 0 || count64 > BigInt(Math.floor((end - (start + 2 + cBytes)) / 2))) {
+      return [0, 0, 0, 0, false];
+    }
+    countNum = Number(count64);
+    cn = cBytes;
+  }
+  const pos = start + 2 + cn;
+  if (pos > end || countNum > (end - pos) >>> 1) {
+    return [0, 0, 0, 0, false];
+  }
+  return [keyWT, valWT, countNum, pos, true];
+}
 
 // ============================================================================
 // Pluggable UTF-8 String Codec (Tuned by @omnibuf/web and @omnibuf/node)
@@ -423,8 +551,12 @@ export function appendVarint(dst: Uint8Array, v: number | bigint): Uint8Array {
  * Decodes a Prefix-Varint from `b` starting at `pos` (default 0).
  * Returns `[value, bytesRead]`. If truncated, returns `[0, 0]`.
  */
-export function decodeVarint(b: Uint8Array, pos = 0): [value: number, bytesRead: number] {
-  const rem = b.length - pos;
+export function decodeVarint(
+  b: Uint8Array,
+  pos = 0,
+  end = b.length,
+): [value: number, bytesRead: number] {
+  const rem = end - pos;
   if (rem <= 0) return [0, 0];
   const b0 = b[pos]!;
   if ((b0 & 1) !== 0) {
@@ -440,7 +572,7 @@ export function decodeVarint(b: Uint8Array, pos = 0): [value: number, bytesRead:
     const u32 = (b0 | (b[pos + 1]! << 8) | (b[pos + 2]! << 16) | (b[pos + 3]! << 24)) >>> 0;
     return [u32 >>> 3, 4];
   }
-  if (rem < 9) return [0, 0];
+  if (b0 !== 0 || rem < 9) return [0, 0];
   const lo = (b[pos + 1]! | (b[pos + 2]! << 8) | (b[pos + 3]! << 16) | (b[pos + 4]! << 24)) >>> 0;
   const hi = (b[pos + 5]! | (b[pos + 6]! << 8) | (b[pos + 7]! << 16) | (b[pos + 8]! << 24)) >>> 0;
   return [hi * 0x100000000 + lo, 9];
@@ -450,8 +582,12 @@ export function decodeVarint(b: Uint8Array, pos = 0): [value: number, bytesRead:
  * Decodes a Prefix-Varint from `b` starting at `pos` as an exact 64-bit unsigned `bigint`.
  * Returns `[value, bytesRead]`. If truncated, returns `[0n, 0]`.
  */
-export function decodeVarintBigInt(b: Uint8Array, pos = 0): [value: bigint, bytesRead: number] {
-  const rem = b.length - pos;
+export function decodeVarintBigInt(
+  b: Uint8Array,
+  pos = 0,
+  end = b.length,
+): [value: bigint, bytesRead: number] {
+  const rem = end - pos;
   if (rem <= 0) return [0n, 0];
   const b0 = b[pos]!;
   if ((b0 & 1) !== 0) {
@@ -467,7 +603,7 @@ export function decodeVarintBigInt(b: Uint8Array, pos = 0): [value: bigint, byte
     const u32 = (b0 | (b[pos + 1]! << 8) | (b[pos + 2]! << 16) | (b[pos + 3]! << 24)) >>> 0;
     return [BigInt(u32 >>> 3), 4];
   }
-  if (rem < 9) return [0n, 0];
+  if (b0 !== 0 || rem < 9) return [0n, 0];
   let u64 = 0n;
   for (let i = 8; i >= 1; i--) {
     u64 = (u64 << 8n) | BigInt(b[pos + i]!);
@@ -482,8 +618,9 @@ export function decodeVarintBigInt(b: Uint8Array, pos = 0): [value: bigint, byte
 export function decodeVarintAuto(
   b: Uint8Array,
   pos = 0,
+  end = b.length,
 ): [value: number | bigint, bytesRead: number] {
-  const rem = b.length - pos;
+  const rem = end - pos;
   if (rem <= 0) return [0, 0];
   const b0 = b[pos]!;
   if ((b0 & 1) !== 0) {
@@ -498,7 +635,7 @@ export function decodeVarintAuto(
     const u32 = (b0 | (b[pos + 1]! << 8) | (b[pos + 2]! << 16) | (b[pos + 3]! << 24)) >>> 0;
     return [u32 >>> 3, 4];
   }
-  if (rem < 9) return [0, 0];
+  if (b0 !== 0 || rem < 9) return [0, 0];
   const lo = (b[pos + 1]! | (b[pos + 2]! << 8) | (b[pos + 3]! << 16) | (b[pos + 4]! << 24)) >>> 0;
   const hi = (b[pos + 5]! | (b[pos + 6]! << 8) | (b[pos + 7]! << 16) | (b[pos + 8]! << 24)) >>> 0;
   if (hi <= 0x1fffff) {
@@ -581,8 +718,10 @@ export function fastSkipValue(packet: Uint8Array, pos: number, wt: number): numb
         pos += 2;
       } else if ((vb & 4) !== 0) {
         pos += 4;
-      } else {
+      } else if (vb === 0) {
         pos += 9;
+      } else {
+        return -1;
       }
       return pos <= n ? pos : -1;
     }
@@ -592,36 +731,41 @@ export function fastSkipValue(packet: Uint8Array, pos: number, wt: number): numb
     case WireString:
     case WireBytes:
     case WireSubMsg:
-    case WireStringArr:
-    case WireUintArr:
-    case WireSubMsgArr:
+    case WireArray:
     case WireMap:
-    case WireSintArr:
-    case WireFixedArr:
     case WireExtended: {
       if (pos >= n) return -1;
+      const minLen = wt === WireMap ? 3 : wt === WireArray ? 2 : wt === WireExtended ? 1 : 0;
       const lb = packet[pos]!;
       if ((lb & 1) !== 0) {
-        pos += 1 + (lb >>> 1);
+        const lenNum = lb >>> 1;
+        if (lenNum < minLen) return -1;
+        pos += 1 + lenNum;
         return pos <= n ? pos : -1;
       }
       if ((lb & 2) !== 0) {
         if (pos + 2 > n) return -1;
         const u16 = lb | (packet[pos + 1]! << 8);
-        pos += 2 + (u16 >>> 2);
+        const lenNum = u16 >>> 2;
+        if (lenNum < minLen) return -1;
+        pos += 2 + lenNum;
         return pos <= n ? pos : -1;
       }
       const [bLen, bn] = decodeVarintBigInt(packet, pos);
-      if (bn === 0) return -1;
+      if (bn === 0 || bLen < BigInt(minLen)) return -1;
       const rem = BigInt(n - (pos + bn));
       if (bLen > rem) return -1;
       pos += bn + Number(bLen);
       return pos <= n ? pos : -1;
     }
     case WireFixed32:
+    case WireSfixed32:
+    case WireFloat32:
       pos += 4;
       return pos <= n ? pos : -1;
     case WireFixed64:
+    case WireSfixed64:
+    case WireFloat64:
       pos += 8;
       return pos <= n ? pos : -1;
     default:
@@ -633,37 +777,124 @@ export function fastSkipValue(packet: Uint8Array, pos: number, wt: number): numb
  * Advances `pos` past a single field payload of the given 4-bit `wireType` (0..15),
  * performing full bounds and structural alignment validation in O(1) time.
  */
+function isValidArrayHeaderAt(body: Uint8Array, start: number, end: number): boolean {
+  if (end - start < 2) return false;
+  const elemType = body[start]!;
+  if (elemType > WireExtended || elemType === WireBoolTrue) return false;
+  let countNum = 0;
+  let cn = 0;
+  const cb = body[start + 1]!;
+  if ((cb & 1) !== 0) {
+    countNum = cb >>> 1;
+    cn = 1;
+  } else if ((cb & 2) !== 0) {
+    if (start + 3 > end) return false;
+    countNum = (cb | (body[start + 2]! << 8)) >>> 2;
+    cn = 2;
+  } else {
+    const [count64, cBytes] = decodeVarintBigInt(body, start + 1, end);
+    if (cBytes === 0 || count64 > BigInt(end - (start + 1 + cBytes))) return false;
+    countNum = Number(count64);
+    cn = cBytes;
+  }
+  const pos = start + 1 + cn;
+  if (pos > end) return false;
+  const remaining = end - pos;
+  switch (elemType) {
+    case WireBoolFalse:
+      return countNum === remaining;
+    case WireFixed32:
+    case WireFloat32:
+    case WireSfixed32:
+      return (remaining & 3) === 0 && countNum === remaining >>> 2;
+    case WireFixed64:
+    case WireFloat64:
+    case WireSfixed64:
+      return (remaining & 7) === 0 && countNum === remaining >>> 3;
+    default:
+      return countNum <= remaining;
+  }
+}
+
+function isValidMapHeaderAt(body: Uint8Array, start: number, end: number): boolean {
+  if (end - start < 3) return false;
+  const keyWT = body[start]!;
+  const valWT = body[start + 1]!;
+  const validKey =
+    keyWT === WireUint ||
+    keyWT === WireSint ||
+    keyWT === WireBoolFalse ||
+    keyWT === WireFixed32 ||
+    keyWT === WireFixed64 ||
+    keyWT === WireSfixed32 ||
+    keyWT === WireSfixed64 ||
+    keyWT === WireString;
+  const validVal = valWT <= WireExtended && valWT !== WireBoolTrue;
+  if (!validKey || !validVal) return false;
+  let countNum = 0;
+  let cn = 0;
+  const cb = body[start + 2]!;
+  if ((cb & 1) !== 0) {
+    countNum = cb >>> 1;
+    cn = 1;
+  } else if ((cb & 2) !== 0) {
+    if (start + 4 > end) return false;
+    countNum = (cb | (body[start + 3]! << 8)) >>> 2;
+    cn = 2;
+  } else {
+    const [count64, cBytes] = decodeVarintBigInt(body, start + 2, end);
+    if (cBytes === 0 || count64 > BigInt(Math.floor((end - (start + 2 + cBytes)) / 2)))
+      return false;
+    countNum = Number(count64);
+    cn = cBytes;
+  }
+  const pos = start + 2 + cn;
+  return pos <= end && countNum <= (end - pos) >>> 1;
+}
+
 export function skipValue(b: Uint8Array, pos: number, wireType: number): number {
-  if (pos < 0 || pos > b.length) {
+  const n = b.length;
+  if (pos < 0 || pos > n) {
     throw new Error(`omnibuf: position ${pos} out of bounds`);
   }
-  if (wireType === WireFixedArr || wireType === WireExtended) {
-    const [bLen, bn] = decodeVarintBigInt(b, pos);
-    const rem = BigInt(b.length - (pos + bn));
-    if (bn === 0 || bLen < 1n || bLen > rem) {
-      throw new Error(`omnibuf: invalid container length at ${pos}`);
+  if (wireType === WireArray || wireType === WireMap || wireType === WireExtended) {
+    if (pos >= n) {
+      throw new Error('omnibuf: invalid container length');
     }
-    const lenNum = Number(bLen);
-    pos += bn;
-    if (wireType === WireFixedArr) {
-      const elemType = b[pos]!;
-      if (elemType === WireFixed32) {
-        if ((lenNum - 1) % 4 !== 0) {
-          throw new Error(
-            `omnibuf: WireFixedArr(Fixed32) payload ${lenNum - 1} is not a multiple of 4 at ${pos}`,
-          );
-        }
-      } else if (elemType === WireFixed64) {
-        if ((lenNum - 1) % 8 !== 0) {
-          throw new Error(
-            `omnibuf: WireFixedArr(Fixed64) payload ${lenNum - 1} is not a multiple of 8 at ${pos}`,
-          );
-        }
-      } else {
-        throw new Error(`omnibuf: invalid WireFixedArr ElemType ${elemType} at ${pos}`);
+    let lenNum = 0;
+    let ln = 0;
+    const lb = b[pos]!;
+    if ((lb & 1) !== 0) {
+      lenNum = lb >>> 1;
+      ln = 1;
+    } else if ((lb & 2) !== 0) {
+      if (pos + 2 > n) {
+        throw new Error('omnibuf: invalid container length');
+      }
+      lenNum = (lb | (b[pos + 1]! << 8)) >>> 2;
+      ln = 2;
+    } else {
+      const [bLen, lBytes] = decodeVarintBigInt(b, pos);
+      if (lBytes === 0 || bLen < 1n || bLen > BigInt(n - pos - lBytes)) {
+        throw new Error('omnibuf: invalid container length');
+      }
+      lenNum = Number(bLen);
+      ln = lBytes;
+    }
+    if (lenNum < 1 || pos + ln + lenNum > n) {
+      throw new Error('omnibuf: invalid container length');
+    }
+    const end = pos + ln + lenNum;
+    if (wireType === WireArray) {
+      if (!isValidArrayHeaderAt(b, pos + ln, end)) {
+        throw new Error('omnibuf: invalid array header');
+      }
+    } else if (wireType === WireMap) {
+      if (!isValidMapHeaderAt(b, pos + ln, end)) {
+        throw new Error('omnibuf: invalid map header');
       }
     }
-    return pos + lenNum;
+    return end;
   }
   const nextPos = fastSkipValue(b, pos, wireType);
   if (nextPos < 0) {
@@ -713,7 +944,7 @@ export function locateField(packet: Uint8Array, targetField: number): LocateFiel
       pos += 2;
     } else {
       const [tag, tn] = decodeVarintBigInt(packet, pos);
-      if (tn === 0 || tag >> 4n > 0xffffffffn) {
+      if (tn === 0 || tag >> 4n > 536870911n) {
         return NOT_FOUND;
       }
       fnum = Number(tag >> 4n);
@@ -781,7 +1012,7 @@ export function nextContainerField(
       pos += 2;
     } else {
       const [tag, tn] = decodeVarintBigInt(packet, pos);
-      if (tn === 0 || tag >> 4n > 0xffffffffn) {
+      if (tn === 0 || tag >> 4n > 536870911n) {
         return { body: new Uint8Array(0), nextPos: 0, matched: false, valid: false };
       }
       fnum = Number(tag >> 4n);
@@ -790,15 +1021,33 @@ export function nextContainerField(
     }
 
     if (fnum === targetField) {
-      if (wt !== expWT) {
+      if (wt !== expWT || pos >= n) {
         return { body: new Uint8Array(0), nextPos: 0, matched: false, valid: false };
       }
-      const [bLen, bn] = decodeVarintBigInt(packet, pos);
-      const rem = BigInt(n - (pos + bn));
-      if (bn === 0 || bLen < BigInt(minLen) || bLen > rem) {
+      let lenNum = 0;
+      let bn = 0;
+      const lb = packet[pos]!;
+      if ((lb & 1) !== 0) {
+        lenNum = lb >>> 1;
+        bn = 1;
+      } else if ((lb & 2) !== 0) {
+        if (pos + 2 > n) {
+          return { body: new Uint8Array(0), nextPos: 0, matched: false, valid: false };
+        }
+        lenNum = (lb | (packet[pos + 1]! << 8)) >>> 2;
+        bn = 2;
+      } else {
+        const [bLen, bBytes] = decodeVarintBigInt(packet, pos);
+        const rem = BigInt(n - (pos + bBytes));
+        if (bBytes === 0 || bLen < BigInt(minLen) || bLen > rem) {
+          return { body: new Uint8Array(0), nextPos: 0, matched: false, valid: false };
+        }
+        lenNum = Number(bLen);
+        bn = bBytes;
+      }
+      if (lenNum < minLen || pos + bn + lenNum > n) {
         return { body: new Uint8Array(0), nextPos: 0, matched: false, valid: false };
       }
-      const lenNum = Number(bLen);
       pos += bn;
       return {
         body: packet.subarray(pos, pos + lenNum),
@@ -825,8 +1074,9 @@ export function readLenSlice(
   data: Uint8Array,
   pos: number,
   minLen = 0,
+  end = data.length,
 ): [body: Uint8Array, nextPos: number] {
-  const n = data.length;
+  const n = end;
   if (pos >= n) {
     throw new Error(`omnibuf: truncated length varint at ${pos}`);
   }
@@ -850,7 +1100,7 @@ export function readLenSlice(
     }
     return [data.subarray(pos, pos + lenNum), pos + lenNum];
   }
-  const [bLen, bn] = decodeVarintBigInt(data, pos);
+  const [bLen, bn] = decodeVarintBigInt(data, pos, n);
   if (bn === 0) {
     throw new Error(`omnibuf: truncated length varint at ${pos}`);
   }

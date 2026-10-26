@@ -9,10 +9,10 @@ TypeScript and ECMAScript implementation of the **OmniBuf** wire format specific
 OmniBuf is a binary wire format and Protobuf encoding designed for the hardware instructions and memory hierarchies of modern CPUs:
 
 - **Prefix-Varints (`TZCNT` / `Math.clz32`)**: All variable-length integers and tags place their byte-length metadata in the lowest bits of the first byte (`1`, `2`, `4`, or `9` bytes little-endian), eliminating 7-bit continuation loops.
-- **16 Explicit 4-Bit Wire Types (`0..15`)**: Explicit length headers on every variable-length container (`string`, `bytes`, `submsg`, `string_arr`, `uint_arr`, `submsg_arr`, `map`, `sint_arr`, `fixed_arr`) enable $O(1)$ header-hop field skipping.
+- **16 Explicit 4-Bit Wire Types (`0..15`)**: Explicit length headers on every variable-length container (`string`, `bytes`, `submsg`, `array`, `map`, `extended`) and distinct scalar fixed/float wire types enable $O(1)$ header-hop field skipping.
 - **Single-Pass Serialization**: Overlong 2-byte Prefix-Varint length reservations allow single-pass forward buffer construction with $O(1)$ 16-bit little-endian backpatching.
 - **Zero-Decode Routing & Splicing**: `locateField` and `spliceFields` inspect or mutate individual fields in a serialized packet without decoding untouched fields.
-- **Self-Describing Mode (`Field #0`)**: Optional inline `SchemaMeta` (`Tag = 0x0B`) enables schema-less `decodeBlind` / `decodeBlindJSON` inspection.
+- **Self-Describing Mode (`Field #0`)**: Optional inline `SchemaMeta` (`Tag = 0x19`) enables schema-less `decodeBlind` / `decodeBlindJSON` inspection.
 
 ---
 
