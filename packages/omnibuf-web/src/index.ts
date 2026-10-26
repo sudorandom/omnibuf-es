@@ -17,13 +17,16 @@ import {
   WireUintArr,
   base64ToUint8Array,
   decodeBlind,
+  decodeSchemaMeta,
   decodeVarintAuto,
   decodeVarintBigInt,
   decodeZigZagAuto,
+  encodeField0SchemaMeta,
   float32FromBits,
   float64FromBits,
   nextContainerField,
   readField0SchemaMeta,
+  readLenSlice,
   roundFloat32Shortest,
   setStringCodec,
   uint8ArrayToBase64,
@@ -431,14 +434,15 @@ export interface PacketInspection {
 export function inspectPacket(packet: Uint8Array): PacketInspection {
   const blind = decodeBlind(packet);
   const [schemaMeta] = readField0SchemaMeta(packet);
+  const f0Prefix = schemaMeta ? encodeField0SchemaMeta(schemaMeta, true) : null;
   const fields: InspectedField[] = [];
 
   let pos = 0;
   while (pos < packet.length) {
     const startOffset = pos;
     const [rawTag, tn] = decodeVarintBigInt(packet, pos);
-    if (tn === 0) {
-      throw new Error(`omnibuf/web: truncated tag at ${pos}`);
+    if (tn === 0 || rawTag >> 4n > 0xffffffffn) {
+      throw new Error(`omnibuf/web: invalid or truncated tag at ${pos}`);
     }
     const fieldNumber = Number(rawTag >> 4n);
     const wireType = Number(rawTag & 0x0fn);
@@ -446,6 +450,8 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
 
     let valEnd = tagEnd;
     let previewValue: unknown = null;
+    const fieldName =
+      fieldNumber === 0 ? '_schema' : (schemaMeta?.fields?.[fieldNumber] ?? `field_${fieldNumber}`);
 
     switch (wireType) {
       case WireBoolFalse:
@@ -458,17 +464,26 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
         break;
       case WireUint: {
         const [v, vn] = decodeVarintAuto(packet, tagEnd);
+        if (vn === 0) {
+          throw new Error(`omnibuf/web: truncated uint at ${tagEnd}`);
+        }
         valEnd = tagEnd + vn;
         previewValue = v;
         break;
       }
       case WireSint: {
         const [raw, vn] = decodeVarintBigInt(packet, tagEnd);
+        if (vn === 0) {
+          throw new Error(`omnibuf/web: truncated sint at ${tagEnd}`);
+        }
         valEnd = tagEnd + vn;
         previewValue = decodeZigZagAuto(raw);
         break;
       }
       case WireFixed32: {
+        if (packet.length - tagEnd < 4) {
+          throw new Error(`omnibuf/web: truncated fixed32 at ${tagEnd}`);
+        }
         valEnd = tagEnd + 4;
         const u32 =
           (packet[tagEnd]! |
@@ -480,6 +495,9 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
         break;
       }
       case WireFixed64: {
+        if (packet.length - tagEnd < 8) {
+          throw new Error(`omnibuf/web: truncated fixed64 at ${tagEnd}`);
+        }
         valEnd = tagEnd + 8;
         let u64 = 0n;
         for (let b = 7; b >= 0; b--) {
@@ -489,25 +507,30 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
         break;
       }
       default: {
-        const [lenBig, ln] = decodeVarintBigInt(packet, tagEnd);
-        const payloadStart = tagEnd + ln;
-        const len = Number(lenBig);
-        valEnd = payloadStart + len;
-        if (wireType === WireString) {
-          previewValue = BrowserStringCodec.decode(packet, payloadStart, valEnd);
+        const [bodySlice, nextPos] = readLenSlice(packet, tagEnd, 0);
+        valEnd = nextPos;
+        if (fieldNumber === 0) {
+          previewValue = decodeSchemaMeta(bodySlice);
+        } else if (wireType === WireString) {
+          previewValue = BrowserStringCodec.decode(bodySlice, 0, bodySlice.length);
         } else {
-          const fname =
-            fieldNumber === 0
-              ? '_schema'
-              : (schemaMeta?.fields?.[fieldNumber] ?? `field_${fieldNumber}`);
-          previewValue = fname === '_schema' ? schemaMeta : blind[fname];
+          // Decode this specific field slice in isolation so duplicate/concatenated occurrences
+          // show their own slice value rather than only the final merged packet state
+          const singleFieldSlice = packet.subarray(startOffset, valEnd);
+          if (f0Prefix) {
+            const combined = new Uint8Array(f0Prefix.length + singleFieldSlice.length);
+            combined.set(f0Prefix, 0);
+            combined.set(singleFieldSlice, f0Prefix.length);
+            const singleBlind = decodeBlind(combined);
+            previewValue = singleBlind[fieldName];
+          } else {
+            const singleBlind = decodeBlind(singleFieldSlice);
+            previewValue = singleBlind[fieldName];
+          }
         }
         break;
       }
     }
-
-    const fieldName =
-      fieldNumber === 0 ? '_schema' : (schemaMeta?.fields?.[fieldNumber] ?? `field_${fieldNumber}`);
 
     fields.push({
       offset: startOffset,

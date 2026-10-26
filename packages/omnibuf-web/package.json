@@ -4,7 +4,6 @@
   "description": "OmniBuf for browsers and frontend runtimes - Web Streams, Blob/Response helpers, and interactive wire inspection",
   "type": "module",
   "license": "MIT",
-  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

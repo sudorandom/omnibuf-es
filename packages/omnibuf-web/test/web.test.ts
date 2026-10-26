@@ -244,4 +244,29 @@ describe('@omnibuf/web - Browser codecs, Binary Helpers, Web Streams, and Packet
       tags: ['v1', 'canary'],
     });
   });
+
+  it('inspects concatenated packets with per-slice container values and rejects truncated packets', () => {
+    const pkt1 = TelemetryEvent.encode(
+      { event_id: 1, service: 'svc-1', healthy: true, tags: ['a'] },
+      { selfDescribing: true },
+    );
+    const pkt2 = TelemetryEvent.encode({
+      event_id: 2,
+      service: 'svc-2',
+      healthy: false,
+      tags: ['b'],
+    });
+    const combined = new Uint8Array(pkt1.length + pkt2.length);
+    combined.set(pkt1, 0);
+    combined.set(pkt2, pkt1.length);
+
+    const info = inspectPacket(combined);
+    const tagFields = info.fields.filter((f) => f.fieldName === 'tags');
+    expect(tagFields.length).toBe(2);
+    expect(tagFields[0]!.value).toEqual(['a']);
+    expect(tagFields[1]!.value).toEqual(['b']);
+    expect(info.blind.tags).toEqual(['a', 'b']);
+
+    assert.throws(() => inspectPacket(new Uint8Array([0x10, 0x80])));
+  });
 });

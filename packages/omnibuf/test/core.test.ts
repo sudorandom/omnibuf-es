@@ -23,7 +23,9 @@ function expect(actual: any) {
   };
 }
 import {
+  DescriptorRegistry,
   Encoder,
+  base64ToUint8Array,
   clearField,
   clone,
   concatMessages,
@@ -453,5 +455,61 @@ describe('@omnibuf/core - Tier 2 (@bufbuild/protobuf DescMessage) & Tier 3 (Deco
 
     clearField(RouteAnnouncementSchema, mergedTarget, 'originAsn');
     expect(mergedTarget.originAsn).toBe(0);
+  });
+
+  it('returns independent Uint8Array buffers from Schema.encode and spliceFields without shared slab aliasing', () => {
+    const ItemSchema = defineMessage<{ id: number; name: string }>('omnibuf.test.Item', {
+      id: { fieldNum: 1, type: 'uint32' },
+      name: { fieldNum: 2, type: 'string' },
+    });
+
+    const pkt1 = ItemSchema.encode({ id: 1, name: 'alpha' });
+    const snapshot1 = Uint8Array.from(pkt1);
+    const pkt2 = ItemSchema.encode({ id: 2, name: 'bravo-longer-payload' });
+    expect(pkt1.buffer !== pkt2.buffer).toBe(true);
+    pkt2.fill(0xff);
+    expect(pkt1).toEqual(snapshot1);
+
+    const spliced1 = spliceFields(pkt1, 1 << 2, 2, (enc) => {
+      enc.writeString(2, 'alpha-v2');
+    });
+    const splicedSnapshot = Uint8Array.from(spliced1);
+    const spliced2 = spliceFields(pkt1, 1 << 2, 2, (enc) => {
+      enc.writeString(2, 'alpha-v3-extra-bytes');
+    });
+    expect(spliced1.buffer !== spliced2.buffer).toBe(true);
+    spliced2.fill(0);
+    expect(spliced1).toEqual(splicedSnapshot);
+  });
+
+  it('validates base64 input in base64ToUint8Array and rejects malformed strings', () => {
+    expect(base64ToUint8Array('AQID')).toEqual(new Uint8Array([1, 2, 3]));
+    assert.throws(() => base64ToUint8Array('ABC'), /invalid base64 string length/);
+    assert.throws(() => base64ToUint8Array('AB$D'), /invalid base64 character/);
+    assert.throws(() => base64ToUint8Array('A=CD'), /invalid base64/);
+  });
+
+  it('prevents DescriptorRegistry shortName collisions from overwriting earlier schemas', () => {
+    const reg = new DescriptorRegistry({
+      file: [
+        {
+          name: 'a.proto',
+          package: 'pkg.a',
+          messageType: [
+            { name: 'Item', field: [{ name: 'a_val', number: 1, type: 'TYPE_UINT32' }] },
+          ],
+        },
+        {
+          name: 'b.proto',
+          package: 'pkg.b',
+          messageType: [
+            { name: 'Item', field: [{ name: 'b_val', number: 1, type: 'TYPE_STRING' }] },
+          ],
+        },
+      ],
+    });
+    expect(reg.getSchema('pkg.a.Item')?.typeName).toBe('pkg.a.Item');
+    expect(reg.getSchema('pkg.b.Item')?.typeName).toBe('pkg.b.Item');
+    expect(reg.getSchema('Item')?.typeName).toBe('pkg.a.Item');
   });
 });

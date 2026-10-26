@@ -62,7 +62,7 @@ export class Encoder {
   beginMessage(minRemaining = 1024): number {
     this.depth = 0;
     if (this.buf.length - this.pos < minRemaining || this.buf.length > 16384) {
-      this.buf = new Uint8Array(8192);
+      this.buf = new Uint8Array(Math.max(8192, minRemaining));
       this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
       this.pos = 0;
     }
@@ -70,9 +70,17 @@ export class Encoder {
   }
 
   /**
-   * Returns a slice view `[startPos, this.pos)` of the encoded message in the slab.
+   * Returns a standalone `Uint8Array` copy of `[startPos, this.pos)` in the slab.
    */
   endMessage(startPos: number): Uint8Array {
+    return this.buf.slice(startPos, this.pos);
+  }
+
+  /**
+   * Returns a zero-copy subarray view `[startPos, this.pos)` of the encoded message in the slab.
+   * Only valid until the slab region is overwritten or reset.
+   */
+  endMessageView(startPos: number): Uint8Array {
     return this.buf.subarray(startPos, this.pos);
   }
 

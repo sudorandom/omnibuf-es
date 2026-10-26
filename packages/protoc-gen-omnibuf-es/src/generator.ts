@@ -261,6 +261,26 @@ function tsTypeForField(f: ResolvedField): string {
   return base;
 }
 
+function defaultValueExprForField(f: ResolvedField): string {
+  if (f.isMap) return '{}';
+  if (f.repeated) return '[]';
+  if (f.explicitPresence) return 'undefined';
+  switch (f.type) {
+    case ProtoScalarType.STRING:
+      return "''";
+    case ProtoScalarType.BOOL:
+      return 'false';
+    case ProtoScalarType.BYTES:
+      return 'new Uint8Array(0)';
+    case ProtoScalarType.MESSAGE:
+      return 'null';
+    case ProtoScalarType.ENUM:
+      return '0 as any';
+    default:
+      return '0';
+  }
+}
+
 function schemaTypeString(f: { type: number; repeated: boolean; isMap: boolean }): string {
   if (f.isMap) return 'map';
   const suffix = f.repeated ? '[]' : '';
@@ -1010,45 +1030,63 @@ function emitOpaqueGetterBody(f: ResolvedField, oneof?: ResolvedOneof): string {
     const keyKind = schemaTypeString({ type: f.mapKeyType, repeated: false, isMap: false });
     const valKind = schemaTypeString({ type: f.mapValType, repeated: false, isMap: false });
     const subDecoder = f.mapValMsgSymbol ? `, (sub) => decode${f.mapValMsgSymbol}(sub)` : '';
-    return `return readTypedMap(this._raw, ${num}, ${JSON.stringify(keyKind)}, ${JSON.stringify(valKind)}${subDecoder})[0];`;
+    return `if (this.${f.storageProp} === undefined) { this.${f.storageProp} = readTypedMap(this._raw, ${num}, ${JSON.stringify(keyKind)}, ${JSON.stringify(valKind)}${subDecoder})[0]; } return this.${f.storageProp}!;`;
   }
   if (f.repeated) {
+    let readExpr: string;
     switch (f.type) {
       case ProtoScalarType.STRING:
-        return `return readStringArr(this._raw, ${num})[0];`;
+        readExpr = `readStringArr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.BYTES:
-        return `return readBytesArr(this._raw, ${num})[0];`;
+        readExpr = `readBytesArr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.BOOL:
-        return `return readBoolArr(this._raw, ${num})[0];`;
+        readExpr = `readBoolArr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.UINT32:
-        return `return readUint32Arr(this._raw, ${num})[0] as any;`;
+        readExpr = `readUint32Arr(this._raw, ${num})[0] as any`;
+        break;
       case ProtoScalarType.ENUM:
-        return `return readEnumArr(this._raw, ${num})[0] as any;`;
+        readExpr = `readEnumArr(this._raw, ${num})[0] as any`;
+        break;
       case ProtoScalarType.UINT64:
-        return `return readUintArr(this._raw, ${num})[0];`;
+        readExpr = `readUintArr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.SINT32:
       case ProtoScalarType.INT32:
-        return `return readSintArr(this._raw, ${num})[0] as number[];`;
+        readExpr = `readSintArr(this._raw, ${num})[0] as number[]`;
+        break;
       case ProtoScalarType.SINT64:
       case ProtoScalarType.INT64:
-        return `return readSintArr(this._raw, ${num})[0];`;
+        readExpr = `readSintArr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.FLOAT:
-        return `return readFloat32Arr(this._raw, ${num})[0].map(roundFloat32Shortest);`;
+        readExpr = `readFloat32Arr(this._raw, ${num})[0].map(roundFloat32Shortest)`;
+        break;
       case ProtoScalarType.DOUBLE:
-        return `return readFloat64Arr(this._raw, ${num})[0];`;
+        readExpr = `readFloat64Arr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.FIXED32:
-        return `return readFixed32Arr(this._raw, ${num})[0];`;
+        readExpr = `readFixed32Arr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.SFIXED32:
-        return `return readSfixed32Arr(this._raw, ${num})[0];`;
+        readExpr = `readSfixed32Arr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.FIXED64:
-        return `return readFixed64Arr(this._raw, ${num})[0];`;
+        readExpr = `readFixed64Arr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.SFIXED64:
-        return `return readSfixed64Arr(this._raw, ${num})[0];`;
+        readExpr = `readSfixed64Arr(this._raw, ${num})[0]`;
+        break;
       case ProtoScalarType.MESSAGE:
-        return `return readSubMsgArrDecoded(this._raw, ${num}, (sub) => decode${f.subMsgSymbol}(sub))[0];`;
+        readExpr = `readSubMsgArrDecoded(this._raw, ${num}, (sub) => decode${f.subMsgSymbol}(sub))[0]`;
+        break;
       default:
-        return `return [];`;
+        readExpr = `[]`;
+        break;
     }
+    return `if (this.${f.storageProp} === undefined) { this.${f.storageProp} = ${readExpr}; } return this.${f.storageProp}!;`;
   }
   if (f.explicitPresence || f.oneofLocalName) {
     const srcExpr = oneof ? 'slice' : 'this._raw';
@@ -1124,7 +1162,7 @@ function emitOpaqueGetterBody(f: ResolvedField, oneof?: ResolvedOneof): string {
     case ProtoScalarType.DOUBLE:
       return `return readFloat64(this._raw, ${num})[0];`;
     case ProtoScalarType.MESSAGE:
-      return `return readSubMsgMerged<${f.subMsgSymbol}>(this._raw, ${num}, (sub, target, merge) => decode${f.subMsgSymbol}(sub, target, 0, { merge }))[0];`;
+      return `if (this.${f.storageProp} === undefined) { this.${f.storageProp} = readSubMsgMerged<${f.subMsgSymbol}>(this._raw, ${num}, (sub, target, merge) => decode${f.subMsgSymbol}(sub, target, 0, { merge }))[0]; } return this.${f.storageProp};`;
     default:
       return `return readUint(this._raw, ${num})[0];`;
   }
@@ -1165,6 +1203,7 @@ export function generateFileCode(
     'decodeZigZag',
     'decodeZigZagAuto',
     'defineMessage',
+    'encodeField0SchemaMeta',
     'encodeZigZag',
     'float32FromBits',
     'float64FromBits',
@@ -1214,6 +1253,7 @@ export function generateFileCode(
 
   const registerMessageExports = (exportName: string): void => {
     localExportNames.add(exportName);
+    localExportNames.add(`${exportName}Msg`);
     localExportNames.add(`${exportName}Schema`);
     localExportNames.add(`create${exportName}`);
     localExportNames.add(`encode${exportName}`);
@@ -1539,6 +1579,7 @@ export function generateFileCode(
   lines.push('  decodeZigZag,');
   lines.push('  decodeZigZagAuto,');
   lines.push('  defineMessage,');
+  lines.push('  encodeField0SchemaMeta,');
   lines.push('  encodeZigZag,');
   lines.push('  float32FromBits,');
   lines.push('  float64FromBits,');
@@ -1683,10 +1724,61 @@ export function generateFileCode(
     lines.push(');');
     lines.push('');
 
+    // 2b. Hidden-Class Message Implementation
+    lines.push(`class ${msgName}Msg implements ${msgName} {`);
+    lines.push(`  declare $typeName: ${JSON.stringify(fullTypeName)};`);
+    for (const oneof of oneofs) {
+      const variants = oneof.fields.map(
+        (f) =>
+          `{ case: ${JSON.stringify(f.localName)}; value: ${tsTypeForField({ ...f, oneofLocalName: undefined, explicitPresence: false }).replace(' | null', '')} }`,
+      );
+      variants.push('{ case: undefined; value?: undefined }');
+      const unionTs = variants.join(' | ');
+      lines.push(`  ${oneof.localName}: ${unionTs} = { case: undefined };`);
+      if (oneof.emitProtoAlias) {
+        lines.push(`  get ${oneof.protoName}(): ${unionTs} { return this.${oneof.localName}; }`);
+        lines.push(
+          `  set ${oneof.protoName}(v: ${unionTs} | undefined) { this.${oneof.localName} = v ?? { case: undefined }; }`,
+        );
+      }
+    }
+    for (const f of fields) {
+      if (f.oneofLocalName) {
+        const caseCheck =
+          f.name !== f.localName
+            ? `g?.case === ${JSON.stringify(f.localName)} || g?.case === ${JSON.stringify(f.name)}`
+            : `g?.case === ${JSON.stringify(f.localName)}`;
+        lines.push(
+          `  get ${f.localName}(): ${tsTypeForField(f)} { const g = this.${f.oneofLocalName} as any; return (${caseCheck}) ? g.value : undefined; }`,
+        );
+        lines.push(
+          `  set ${f.localName}(v: ${tsTypeForField(f)}) { if (v === undefined || v === null) { const g = this.${f.oneofLocalName} as any; if (${caseCheck}) this.${f.oneofLocalName} = { case: undefined }; } else { this.${f.oneofLocalName} = { case: ${JSON.stringify(f.localName)}, value: v as any }; } }`,
+        );
+        if (f.emitNameAlias) {
+          lines.push(`  get ${f.name}(): ${tsTypeForField(f)} { return this.${f.localName}; }`);
+          lines.push(`  set ${f.name}(v: ${tsTypeForField(f)}) { this.${f.localName} = v; }`);
+        }
+      } else {
+        lines.push(`  ${f.localName}: ${tsTypeForField(f)} = ${defaultValueExprForField(f)};`);
+        if (f.emitNameAlias) {
+          lines.push(`  get ${f.name}(): ${tsTypeForField(f)} { return this.${f.localName}; }`);
+          lines.push(
+            `  set ${f.name}(v: ${tsTypeForField(f)} | undefined) { this.${f.localName} = v as any; }`,
+          );
+        }
+      }
+    }
+    lines.push('}');
+    lines.push(
+      `Object.defineProperty(${msgName}Msg.prototype, '$typeName', { value: ${JSON.stringify(fullTypeName)}, enumerable: false, writable: true, configurable: true });`,
+    );
+    lines.push('');
+
     // 3. Factory
     lines.push(
       `export function create${msgName}(init?: MessageInitShape<typeof ${msgName}Schema>): ${msgName} {`,
     );
+    lines.push(`  if (init === undefined) return new ${msgName}Msg();`);
     lines.push(`  return ${msgName}Schema.create(init);`);
     lines.push('}');
     lines.push('');
@@ -1722,8 +1814,9 @@ export function generateFileCode(
     lines.push('');
 
     // 5. Reflection-Free Specialized Decoder
+    const use32Mask = maxField <= 30;
     lines.push(
-      `export function decode${msgName}(buf: Uint8Array, target?: ${msgName}, depth = 0, options?: BinaryReadOptions): ${msgName} {`,
+      `export function decode${msgName}(buf: Uint8Array, target?: ${msgName}, depth = 0, options?: BinaryReadOptions, startPos = 0, endPos = buf.length): ${msgName} {`,
     );
     lines.push('  const maxDepth = options?.recursionLimit ?? MaxNestingDepth;');
     lines.push('  const readUnknown = options?.readUnknownFields ?? true;');
@@ -1732,12 +1825,18 @@ export function generateFileCode(
       '    throw new Error(`omnibuf: nesting depth ${depth} exceeds MaxNestingDepth (${maxDepth})`);',
     );
     lines.push('  }');
-    lines.push(`  const out = target ?? create${msgName}();`);
-    lines.push('  const n = buf.length;');
-    lines.push('  let pos = 0;');
-    lines.push('  const seen = new Set<number>();');
+    lines.push('  if (endPos < buf.length) buf = buf.subarray(0, endPos);');
+    lines.push(`  const out: ${msgName} = target ?? new ${msgName}Msg();`);
+    lines.push('  const n = endPos;');
+    lines.push('  let pos = startPos;');
+    if (use32Mask) {
+      lines.push('  let seenMask = 0;');
+    } else {
+      lines.push('  let seenMask = 0;');
+      lines.push('  let seenSet: Set<number> | null = null;');
+    }
     lines.push(
-      '  const unknownFields: UnknownField[] = Array.isArray((out as any).$unknown) ? (out as any).$unknown : [];',
+      '  let unknownFields: UnknownField[] | null = Array.isArray((out as any).$unknown) ? (out as any).$unknown : null;',
     );
     lines.push('  while (pos < n) {');
     lines.push('    let tag = 0;');
@@ -1757,7 +1856,7 @@ export function generateFileCode(
     lines.push('      tag = Number(t64);');
     lines.push('      pos += tn;');
     lines.push('    }');
-    lines.push('    const fieldNum = Math.floor(tag / 16);');
+    lines.push('    const fieldNum = tag <= 0x7fffffff ? tag >>> 4 : Math.floor(tag / 16);');
     lines.push('    const wt = tag & 0x0f;');
     lines.push('    if (fieldNum === 0) {');
     lines.push("      if (wt !== 5) throw new Error('omnibuf: invalid Field #0 wire type');");
@@ -1766,7 +1865,14 @@ export function generateFileCode(
     lines.push('      pos = nextPos;');
     lines.push('      continue;');
     lines.push('    }');
-    lines.push('    const alreadySeen = seen.has(fieldNum) || Boolean(options?.merge);');
+    lines.push('    const bit = fieldNum <= 30 ? 1 << fieldNum : 0;');
+    if (use32Mask) {
+      lines.push('    const alreadySeen = (seenMask & bit) !== 0 || Boolean(options?.merge);');
+    } else {
+      lines.push(
+        '    const alreadySeen = (bit !== 0 ? (seenMask & bit) !== 0 : seenSet !== null && seenSet.has(fieldNum)) || Boolean(options?.merge);',
+      );
+    }
     lines.push('    switch (fieldNum) {');
     for (const f of fields) {
       lines.push(`      case ${f.number}: {`);
@@ -1774,13 +1880,19 @@ export function generateFileCode(
       lines.push('          const valStart = pos;');
       lines.push('          pos = validateValue(buf, pos, wt, depth, maxDepth);');
       lines.push('          if (readUnknown) {');
+      lines.push('            if (!unknownFields) unknownFields = [];');
       lines.push(
         '            unknownFields.push({ no: fieldNum, wireType: wt, data: buf.subarray(valStart, pos).slice() });',
       );
       lines.push('          }');
       lines.push('          break;');
       lines.push('        }');
-      lines.push('        seen.add(fieldNum);');
+      if (f.number <= 30) {
+        lines.push('        seenMask |= bit;');
+      } else {
+        lines.push('        if (!seenSet) seenSet = new Set<number>();');
+        lines.push('        seenSet.add(fieldNum);');
+      }
       lines.push(emitDecodeFieldCaseBody(f, '        '));
       lines.push('        break;');
       lines.push('      }');
@@ -1789,6 +1901,7 @@ export function generateFileCode(
     lines.push('        const valStart = pos;');
     lines.push('        pos = validateValue(buf, pos, wt, depth, maxDepth);');
     lines.push('        if (readUnknown) {');
+    lines.push('          if (!unknownFields) unknownFields = [];');
     lines.push(
       '          unknownFields.push({ no: fieldNum, wireType: wt, data: buf.subarray(valStart, pos).slice() });',
     );
@@ -1797,7 +1910,7 @@ export function generateFileCode(
     lines.push('      }');
     lines.push('    }');
     lines.push('  }');
-    lines.push("  if (unknownFields.length > 0 && !('$unknown' in out)) {");
+    lines.push("  if (unknownFields && unknownFields.length > 0 && !('$unknown' in out)) {");
     lines.push(
       "    Object.defineProperty(out, '$unknown', { value: unknownFields, enumerable: false, writable: true, configurable: true });",
     );
@@ -1813,13 +1926,13 @@ export function generateFileCode(
     lines.push('}');
     lines.push('');
     lines.push(`${msgName}Schema.setGeneratedCodec({`);
+    lines.push(`  create: () => new ${msgName}Msg(),`);
     lines.push(`  encode: encode${msgName},`);
     lines.push(`  decode: decode${msgName},`);
     lines.push('});');
     lines.push('');
 
     // 6. Lazy Opaque<Message> View with dirty bitmask & spliceFields
-    const use32Mask = maxField <= 30;
     const zeroMask = use32Mask ? '0' : '0n';
     lines.push(`export class Opaque${msgName} {`);
     lines.push('  private _raw: Uint8Array;');
@@ -1876,25 +1989,35 @@ export function generateFileCode(
     }
 
     lines.push('  marshal(options?: MarshalOptions): Uint8Array {');
-    lines.push(`    if (this._dirtyMask === ${zeroMask}) {`);
-    lines.push('      return this._raw;');
+    lines.push(`    if (this._dirtyMask !== ${zeroMask}) {`);
+    lines.push(
+      `      this._raw = spliceFields(this._raw, this._dirtyMask, ${maxField}, (enc, fnum) => {`,
+    );
+    lines.push('        switch (fnum) {');
+    for (const f of fields) {
+      lines.push(`          case ${f.number}: {`);
+      lines.push(
+        `            const msg = { ${f.localName}: this.${f.storageProp}! } as Partial<${msgName}>;`,
+      );
+      lines.push(emitEncodeField(f, 'msg', '            '));
+      lines.push('            break;');
+      lines.push('          }');
+    }
+    lines.push('        }');
+    lines.push('      });');
+    lines.push(`      this._dirtyMask = ${zeroMask};`);
     lines.push('    }');
     lines.push(
-      `    this._raw = spliceFields(this._raw, this._dirtyMask, ${maxField}, (enc, fnum) => {`,
+      '    if (options?.selfDescribing && (this._raw.length === 0 || this._raw[0] !== 0x0b)) {',
     );
-    lines.push('      switch (fnum) {');
-    for (const f of fields) {
-      lines.push(`        case ${f.number}: {`);
-      lines.push(
-        `          const msg = { ${f.localName}: this.${f.storageProp}! } as Partial<${msgName}>;`,
-      );
-      lines.push(emitEncodeField(f, 'msg', '          '));
-      lines.push('          break;');
-      lines.push('        }');
-    }
-    lines.push('      }');
-    lines.push('    });');
-    lines.push(`    this._dirtyMask = ${zeroMask};`);
+    lines.push(
+      `      const f0 = encodeField0SchemaMeta(${msgName}Schema.getSchemaMeta(0), Boolean(options.deterministic));`,
+    );
+    lines.push('      const out = new Uint8Array(f0.length + this._raw.length);');
+    lines.push('      out.set(f0, 0);');
+    lines.push('      out.set(this._raw, f0.length);');
+    lines.push('      return out;');
+    lines.push('    }');
     lines.push('    return this._raw;');
     lines.push('  }');
     lines.push('}');

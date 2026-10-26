@@ -531,7 +531,9 @@ export class DescriptorRegistry {
       const compiledSchema = defineMessage(fullName, specs);
       building.delete(fullName);
       this.schemas.set(fullName, compiledSchema);
-      this.schemas.set(shortName, compiledSchema);
+      if (!rawMap.has(shortName) && !this.schemas.has(shortName)) {
+        this.schemas.set(shortName, compiledSchema);
+      }
       return compiledSchema;
     };
 

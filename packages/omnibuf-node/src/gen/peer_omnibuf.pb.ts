@@ -13,6 +13,7 @@ import {
   decodeVarintBigInt,
   decodeZigZag,
   defineMessage,
+  encodeField0SchemaMeta,
   float32FromBits,
   readBool,
   readFloat32,
@@ -1531,7 +1532,10 @@ export class OpaquePeerUpdate {
 
   tags(): string[] {
     if ((this._dirtyMask & (1 << 7)) !== 0) return this._tags!;
-    return readStringArr(this._raw, 7)[0];
+    if (this._tags === undefined) {
+      this._tags = readStringArr(this._raw, 7)[0];
+    }
+    return this._tags;
   }
 
   getTags(): string[] {
@@ -1545,7 +1549,10 @@ export class OpaquePeerUpdate {
 
   prefixes(): number[] {
     if ((this._dirtyMask & (1 << 8)) !== 0) return this._prefixes!;
-    return readUint32Arr(this._raw, 8)[0];
+    if (this._prefixes === undefined) {
+      this._prefixes = readUint32Arr(this._raw, 8)[0];
+    }
+    return this._prefixes;
   }
 
   getPrefixes(): number[] {
@@ -1559,9 +1566,12 @@ export class OpaquePeerUpdate {
 
   location(): Location | null {
     if ((this._dirtyMask & (1 << 9)) !== 0) return this._location!;
-    return readSubMsgMerged<Location>(this._raw, 9, (sub, target, merge) =>
-      decodeLocation(sub, target, 0, { merge }),
-    )[0];
+    if (this._location === undefined) {
+      this._location = readSubMsgMerged<Location>(this._raw, 9, (sub, target, merge) =>
+        decodeLocation(sub, target, 0, { merge }),
+      )[0];
+    }
+    return this._location;
   }
 
   getLocation(): Location | null {
@@ -1575,7 +1585,10 @@ export class OpaquePeerUpdate {
 
   neighbors(): Array<Partial<Neighbor>> {
     if ((this._dirtyMask & (1 << 10)) !== 0) return this._neighbors!;
-    return readSubMsgArrDecoded(this._raw, 10, (sub) => decodeNeighbor(sub))[0];
+    if (this._neighbors === undefined) {
+      this._neighbors = readSubMsgArrDecoded(this._raw, 10, (sub) => decodeNeighbor(sub))[0];
+    }
+    return this._neighbors;
   }
 
   getNeighbors(): Array<Partial<Neighbor>> {
@@ -1602,59 +1615,68 @@ export class OpaquePeerUpdate {
   }
 
   marshal(options?: MarshalOptions): Uint8Array {
-    if (this._dirtyMask === 0) {
-      return this._raw;
-    }
-    this._raw = spliceFields(this._raw, this._dirtyMask, 11, (enc, fnum) => {
-      switch (fnum) {
-        case 1:
-          enc.writeUint(1, this._asn ?? 0);
-          break;
-        case 2:
-          enc.writeString(2, this._routerId ?? '');
-          break;
-        case 3:
-          enc.writeBool(3, Boolean(this._active));
-          break;
-        case 4:
-          enc.writeUint(4, this._uptimeSec ?? 0);
-          break;
-        case 5:
-          enc.writeInt(5, this._rssiDbm ?? 0);
-          break;
-        case 6:
-          enc.writeFloat64(6, this._cpuLoad ?? 0);
-          break;
-        case 7:
-          enc.writeStringArr(7, this._tags ?? []);
-          break;
-        case 8:
-          enc.writeUint32Arr(8, this._prefixes ?? []);
-          break;
-        case 9:
-          if (this._location) {
-            enc.beginSubMsg(9);
-            encodeLocation(enc, this._location, options);
-            enc.endSubMsg();
+    if (this._dirtyMask !== 0) {
+      this._raw = spliceFields(this._raw, this._dirtyMask, 11, (enc, fnum) => {
+        switch (fnum) {
+          case 1:
+            enc.writeUint(1, this._asn ?? 0);
+            break;
+          case 2:
+            enc.writeString(2, this._routerId ?? '');
+            break;
+          case 3:
+            enc.writeBool(3, Boolean(this._active));
+            break;
+          case 4:
+            enc.writeUint(4, this._uptimeSec ?? 0);
+            break;
+          case 5:
+            enc.writeInt(5, this._rssiDbm ?? 0);
+            break;
+          case 6:
+            enc.writeFloat64(6, this._cpuLoad ?? 0);
+            break;
+          case 7:
+            enc.writeStringArr(7, this._tags ?? []);
+            break;
+          case 8:
+            enc.writeUint32Arr(8, this._prefixes ?? []);
+            break;
+          case 9:
+            if (this._location) {
+              enc.beginSubMsg(9);
+              encodeLocation(enc, this._location, options);
+              enc.endSubMsg();
+            }
+            break;
+          case 10: {
+            const arr = this._neighbors ?? [];
+            enc.beginSubMsgArr(10);
+            for (let i = 0; i < arr.length; i++) {
+              enc.beginSubMsgElem();
+              encodeNeighbor(enc, arr[i]!, options);
+              enc.endSubMsgElem();
+            }
+            enc.endSubMsgArr();
+            break;
           }
-          break;
-        case 10: {
-          const arr = this._neighbors ?? [];
-          enc.beginSubMsgArr(10);
-          for (let i = 0; i < arr.length; i++) {
-            enc.beginSubMsgElem();
-            encodeNeighbor(enc, arr[i]!, options);
-            enc.endSubMsgElem();
-          }
-          enc.endSubMsgArr();
-          break;
+          case 11:
+            enc.writeUint(11, this._sequence ?? 0);
+            break;
         }
-        case 11:
-          enc.writeUint(11, this._sequence ?? 0);
-          break;
-      }
-    });
-    this._dirtyMask = 0;
+      });
+      this._dirtyMask = 0;
+    }
+    if (options?.selfDescribing && (this._raw.length === 0 || this._raw[0] !== 0x0b)) {
+      const f0 = encodeField0SchemaMeta(
+        PeerUpdateSchema.getSchemaMeta(0),
+        Boolean(options.deterministic),
+      );
+      const out = new Uint8Array(f0.length + this._raw.length);
+      out.set(f0, 0);
+      out.set(this._raw, f0.length);
+      return out;
+    }
     return this._raw;
   }
 }

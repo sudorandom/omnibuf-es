@@ -597,7 +597,7 @@ export class MessageSchema<
         const caseName = f.localName;
         const altCaseName = f.name;
         const propDesc = Object.getOwnPropertyDescriptor(obj, f.propKey);
-        if (!propDesc || 'value' in propDesc) {
+        if (!(f.propKey in obj) || (propDesc && 'value' in propDesc)) {
           const initialPlainVal = propDesc?.value;
           Object.defineProperty(obj, f.propKey, {
             get() {
@@ -2327,6 +2327,10 @@ export function defineMessage<
 
 const SCHEMA_SYMBOL = Symbol.for('omnibuf.schema');
 const PENDING_FIELDS_SYMBOL = Symbol.for('omnibuf.pendingFields');
+
+if (!(Symbol as any).metadata) {
+  (Symbol as any).metadata = Symbol.for('Symbol.metadata');
+}
 
 const classPendingFields = new WeakMap<object, Record<string, FieldSpec>>();
 const classSchemaRegistry = new WeakMap<object, MessageSchema<any>>();

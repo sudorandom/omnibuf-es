@@ -85,6 +85,9 @@ export function uint8ArrayToBase64(bytes: Uint8Array): string {
 export function base64ToUint8Array(b64: string): Uint8Array {
   const clean = b64.replace(/[\r\n\s]/g, '');
   if (clean.length === 0) return new Uint8Array(0);
+  if (clean.length % 4 !== 0) {
+    throw new Error('omnibuf: invalid base64 string length');
+  }
   const pad = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
   const byteLen = (clean.length * 3) / 4 - pad;
   const out = new Uint8Array(byteLen);
@@ -92,8 +95,13 @@ export function base64ToUint8Array(b64: string): Uint8Array {
   for (let i = 0; i < clean.length; i += 4) {
     const c0 = BASE64_CHARS.indexOf(clean[i]!);
     const c1 = BASE64_CHARS.indexOf(clean[i + 1]!);
-    const c2 = clean[i + 2] === '=' ? 0 : BASE64_CHARS.indexOf(clean[i + 2]!);
-    const c3 = clean[i + 3] === '=' ? 0 : BASE64_CHARS.indexOf(clean[i + 3]!);
+    const isPad2 = clean[i + 2] === '=' && i + 4 === clean.length;
+    const isPad3 = clean[i + 3] === '=' && i + 4 === clean.length;
+    const c2 = isPad2 ? 0 : BASE64_CHARS.indexOf(clean[i + 2]!);
+    const c3 = isPad3 ? 0 : BASE64_CHARS.indexOf(clean[i + 3]!);
+    if (c0 < 0 || c1 < 0 || c2 < 0 || c3 < 0 || (isPad2 && !isPad3)) {
+      throw new Error(`omnibuf: invalid base64 character at index ${i}`);
+    }
     const n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
     if (outIdx < byteLen) out[outIdx++] = (n >>> 16) & 0xff;
     if (outIdx < byteLen) out[outIdx++] = (n >>> 8) & 0xff;
