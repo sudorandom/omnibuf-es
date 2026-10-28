@@ -1384,12 +1384,24 @@ export function spliceFields(
   if (maxField <= 30) {
     const mask32 = typeof dirtyMask === 'bigint' ? Number(dirtyMask & 0x7fffffffn) : dirtyMask | 0;
     if (mask32 === 0) {
+      if (enc !== undefined) {
+        enc.detachIfOverlaps(raw, 0);
+        enc.writeRaw(raw);
+        return enc.finish();
+      }
       return raw.slice();
     }
     const useShared = enc === undefined && !sharedSpliceInUse;
     if (useShared) sharedSpliceInUse = true;
     const activeEnc = enc ?? (useShared ? sharedSpliceEncoder : new Encoder(raw.length + 64));
-    const startPos = useShared ? activeEnc.beginMessage(raw.length + 128) : (activeEnc.reset(), 0);
+    let startPos = 0;
+    if (useShared) {
+      startPos = activeEnc.beginMessage(raw.length + 128);
+    } else if (enc !== undefined) {
+      activeEnc.detachIfOverlaps(raw, 64);
+    } else {
+      activeEnc.reset();
+    }
     try {
       const n = raw.length;
       let pos = 0;
@@ -1455,10 +1467,19 @@ export function spliceFields(
 
   const mask = typeof dirtyMask === 'bigint' ? dirtyMask : BigInt(dirtyMask >>> 0);
   if (mask === 0n) {
+    if (enc !== undefined) {
+      enc.detachIfOverlaps(raw, 0);
+      enc.writeRaw(raw);
+      return enc.finish();
+    }
     return raw.slice();
   }
   const activeEnc = enc ?? new Encoder(raw.length + 64);
-  activeEnc.reset();
+  if (enc !== undefined) {
+    activeEnc.detachIfOverlaps(raw, 64);
+  } else {
+    activeEnc.reset();
+  }
   const n = raw.length;
   let pos = 0;
   let cleanStart = 0;

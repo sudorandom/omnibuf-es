@@ -39,10 +39,39 @@ export class Encoder {
   private readonly elemCountStack = new Int32Array(MaxNestingDepth * 2 + 8);
   private depth = 0;
 
-  constructor(initialCapacity = 512) {
-    const cap = Math.max(64, initialCapacity);
-    this.buf = new Uint8Array(cap);
-    this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+  constructor(initialCapacityOrBuffer: number | Uint8Array = 512, initialPos = 0) {
+    if (initialCapacityOrBuffer instanceof Uint8Array) {
+      this.buf = initialCapacityOrBuffer;
+      this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+      this.pos = Math.max(0, Math.min(initialPos, this.buf.byteLength));
+    } else {
+      const cap = Math.max(64, initialCapacityOrBuffer);
+      this.buf = new Uint8Array(cap);
+      this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+    }
+  }
+
+  /**
+   * If `raw` shares the same backing `ArrayBuffer` and overlaps this encoder's buffer capacity,
+   * allocates a fresh backing buffer preserving the existing `[0, this.pos)` prefix so subsequent
+   * writes do not clobber `raw`.
+   */
+  detachIfOverlaps(raw: Uint8Array, extraCapacity = 64): void {
+    if (raw.byteLength === 0 || this.buf.byteLength === 0) return;
+    if (raw.buffer !== this.buf.buffer) return;
+    const dstStart = this.buf.byteOffset;
+    const dstEnd = dstStart + this.buf.byteLength;
+    const rawStart = raw.byteOffset;
+    const rawEnd = rawStart + raw.byteLength;
+    if (dstStart < rawEnd && rawStart < dstEnd) {
+      const nextCap = Math.max(this.buf.byteLength, this.pos + raw.byteLength + extraCapacity);
+      const nextBuf = new Uint8Array(nextCap);
+      if (this.pos > 0) {
+        nextBuf.set(this.buf.subarray(0, this.pos), 0);
+      }
+      this.buf = nextBuf;
+      this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+    }
   }
 
   /**

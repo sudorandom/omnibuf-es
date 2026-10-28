@@ -482,6 +482,37 @@ describe('@omnibuf/core - Tier 2 (@bufbuild/protobuf DescMessage) & Tier 3 (Deco
     expect(spliced1).toEqual(splicedSnapshot);
   });
 
+  it('preserves aliased prefixes in spliceFields without modifying the source packet', () => {
+    const pktEnc = new Encoder(64);
+    pktEnc.writeUint(1, 42);
+    pktEnc.writeUint(2, 99);
+    const packet = pktEnc.finish();
+
+    const appendDirty = (enc: Encoder, fnum: number): void => {
+      enc.writeUint(fnum, 1n << 40n);
+    };
+
+    for (const maxField of [2, 40]) {
+      for (const prefixLen of [0, 3, 32]) {
+        const prefix = new Uint8Array(prefixLen).fill(0xa5);
+        const storage = new Uint8Array(prefixLen + packet.byteLength + 512);
+        storage.set(prefix, 0);
+        storage.set(packet, prefixLen);
+
+        const wantEnc = new Encoder(prefixLen + packet.byteLength + 64);
+        wantEnc.writeRaw(prefix);
+        const want = spliceFields(packet, 1 << 1, maxField, appendDirty, wantEnc);
+
+        const aliasedEnc = new Encoder(storage, prefixLen);
+        const rawSlice = storage.subarray(prefixLen, prefixLen + packet.byteLength);
+        const got = spliceFields(rawSlice, 1 << 1, maxField, appendDirty, aliasedEnc);
+
+        expect(got).toEqual(want);
+        expect(rawSlice).toEqual(packet);
+      }
+    }
+  });
+
   it('validates base64 input in base64ToUint8Array and rejects malformed strings', () => {
     expect(base64ToUint8Array('AQID')).toEqual(new Uint8Array([1, 2, 3]));
     assert.throws(() => base64ToUint8Array('ABC'), /invalid base64 string length/);

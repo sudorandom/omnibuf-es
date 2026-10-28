@@ -1,10 +1,12 @@
 import {
   DescriptorRegistry,
+  Encoder,
   ProtoScalarType,
   decodeBlind,
   decodeBlindJSON,
   defineMessage,
   fromBinary,
+  spliceFields,
   toBinary,
   type FileDescriptorSetJSON,
   type MessageSchema,
@@ -611,6 +613,43 @@ export const TestAllTypesProtobufDesc: ProtobufDescMessage = {
 
 const defaultRegistry = new DescriptorRegistry(CONFORMANCE_FDS);
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+// Exercise the append-oriented runtime directly: generated opaque marshal
+// methods allocate a fresh buffer and cannot test preservation of a nonempty prefix.
+function checkSpliceAliasedPrefix(packet: Uint8Array): void {
+  const appendDirty = (enc: Encoder, fnum: number): void => {
+    enc.writeUint(fnum, 1n << 40n);
+  };
+  const spliced = spliceFields(packet, 1 << 1, 2, appendDirty);
+  for (const prefixLen of [0, 3, 32]) {
+    const prefix = new Uint8Array(prefixLen).fill(0xa5);
+    const storage = new Uint8Array(prefixLen + packet.byteLength + 512);
+    storage.set(prefix, 0);
+    storage.set(packet, prefixLen);
+    const want = new Uint8Array(prefixLen + spliced.byteLength);
+    want.set(prefix, 0);
+    want.set(spliced, prefixLen);
+    const enc = new Encoder(storage, prefixLen);
+    const rawSlice = storage.subarray(prefixLen, prefixLen + packet.byteLength);
+    const got = spliceFields(rawSlice, 1 << 1, 2, appendDirty, enc);
+    if (!bytesEqual(got, want)) {
+      throw new Error(
+        `opaque splice with ${prefixLen}-byte aliased prefix changed prefix or output`,
+      );
+    }
+    if (!bytesEqual(rawSlice, packet)) {
+      throw new Error(`opaque splice with ${prefixLen}-byte aliased prefix modified source packet`);
+    }
+  }
+}
+
 /**
  * Execute a single `ConformanceRequest` and return a `ConformanceResponse`.
  * Matches `cmd/conformance-go/main.go` across all 4 tiers (`TestTierBlind`, `TestTierPlugin`, `TestTierProtobufTypes`, `TestTierAnnotatedStruct`).
@@ -639,6 +678,14 @@ export function handleConformanceRequest(
       }
 
       case TestTierPlugin: {
+        if (req.test_opaque_splice || req.test_opaque_splice_shrink) {
+          try {
+            checkSpliceAliasedPrefix(payload);
+          } catch (err) {
+            resp.runtime_error = err instanceof Error ? err.message : String(err);
+            return resp;
+          }
+        }
         switch (req.message_type) {
           case 'omnibuf.bench.PeerUpdate': {
             const msg = createPeerUpdate({
