@@ -16,6 +16,11 @@ import {
   marshalPeerUpdateOmniBuf,
   unmarshalPeerUpdateOmniBuf,
 } from './gen/peer_omnibuf.pb.js';
+import {
+  OpaqueTestAllTypes,
+  marshalTestAllTypesOmniBuf,
+  unmarshalTestAllTypesOmniBuf,
+} from './gen/conformance_omnibuf.pb.js';
 
 export const WireFormatUnspecified = 0;
 export const WireFormatOmniBuf = 1;
@@ -36,6 +41,7 @@ export interface ConformanceRequest {
   json_payload: string;
   self_describing: boolean;
   test_opaque_splice: boolean;
+  test_opaque_splice_shrink: boolean;
 }
 
 export interface ConformanceResponse {
@@ -57,6 +63,7 @@ export const ConformanceRequestSchema: MessageSchema<ConformanceRequest> =
     json_payload: { fieldNum: 6, type: 'string' },
     self_describing: { fieldNum: 7, type: 'bool' },
     test_opaque_splice: { fieldNum: 8, type: 'bool' },
+    test_opaque_splice_shrink: { fieldNum: 9, type: 'bool' },
   });
 
 export const ConformanceResponseSchema: MessageSchema<ConformanceResponse> =
@@ -433,6 +440,170 @@ export const PeerUpdateProtobufDesc: ProtobufDescMessage = {
   ],
 };
 
+export const AllTypesSubMsgProtobufDesc: ProtobufDescMessage = {
+  typeName: 'omnibuf.conformance.AllTypesSubMsg',
+  fields: [
+    {
+      number: 1,
+      name: 'id',
+      localName: 'id',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.UINT32,
+    },
+    {
+      number: 2,
+      name: 'label',
+      localName: 'label',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.STRING,
+    },
+    {
+      number: 3,
+      name: 'flag',
+      localName: 'flag',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.BOOL,
+    },
+    {
+      number: 4,
+      name: 'score',
+      localName: 'score',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.SINT64,
+    },
+  ],
+};
+
+export const TestAllTypesProtobufDesc: ProtobufDescMessage = {
+  typeName: 'omnibuf.conformance.TestAllTypes',
+  fields: [
+    {
+      number: 1,
+      name: 'f1_uint32',
+      localName: 'f1Uint32',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.UINT32,
+    },
+    {
+      number: 2,
+      name: 'f2_uint64',
+      localName: 'f2Uint64',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.UINT64,
+    },
+    {
+      number: 3,
+      name: 'f3_sint32',
+      localName: 'f3Sint32',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.SINT32,
+    },
+    {
+      number: 4,
+      name: 'f4_sint64',
+      localName: 'f4Sint64',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.SINT64,
+    },
+    {
+      number: 5,
+      name: 'f5_bool',
+      localName: 'f5Bool',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.BOOL,
+    },
+    {
+      number: 6,
+      name: 'f6_string',
+      localName: 'f6String',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.STRING,
+    },
+    {
+      number: 7,
+      name: 'f7_bytes',
+      localName: 'f7Bytes',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.BYTES,
+    },
+    {
+      number: 8,
+      name: 'f8_sub_msg',
+      localName: 'f8SubMsg',
+      fieldKind: 'message',
+      message: AllTypesSubMsgProtobufDesc,
+    },
+    {
+      number: 9,
+      name: 'f9_string_arr',
+      localName: 'f9StringArr',
+      fieldKind: 'list',
+      listKind: 'scalar',
+      scalar: ProtoScalarType.STRING,
+    },
+    {
+      number: 10,
+      name: 'f10_uint32_arr',
+      localName: 'f10Uint32Arr',
+      fieldKind: 'list',
+      listKind: 'scalar',
+      scalar: ProtoScalarType.UINT32,
+    },
+    {
+      number: 11,
+      name: 'f11_sub_msg_arr',
+      localName: 'f11SubMsgArr',
+      fieldKind: 'list',
+      listKind: 'message',
+      message: AllTypesSubMsgProtobufDesc,
+    },
+    {
+      number: 12,
+      name: 'f12_map_str_uint',
+      localName: 'f12MapStrUint',
+      fieldKind: 'map',
+      mapKey: ProtoScalarType.STRING,
+      mapKind: 'scalar',
+      scalar: ProtoScalarType.UINT64,
+    },
+    {
+      number: 13,
+      name: 'f13_float32',
+      localName: 'f13Float32',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.FLOAT,
+    },
+    {
+      number: 14,
+      name: 'f14_float64',
+      localName: 'f14Float64',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.DOUBLE,
+    },
+    {
+      number: 15,
+      name: 'f15_fixed32',
+      localName: 'f15Fixed32',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.FIXED32,
+    },
+    {
+      number: 16,
+      name: 'f16_fixed64',
+      localName: 'f16Fixed64',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.FIXED64,
+    },
+    {
+      number: 20,
+      name: 'f20_overflow_str',
+      localName: 'f20OverflowStr',
+      fieldKind: 'scalar',
+      scalar: ProtoScalarType.STRING,
+    },
+  ],
+};
+
 const defaultRegistry = new DescriptorRegistry(CONFORMANCE_FDS);
 
 /**
@@ -463,67 +634,258 @@ export function handleConformanceRequest(
       }
 
       case TestTierPlugin: {
-        if (req.message_type !== 'omnibuf.bench.PeerUpdate') {
-          resp.skipped = 'plugin tier generated for omnibuf.bench.PeerUpdate';
-          return resp;
-        }
-        let msg;
-        try {
-          msg = unmarshalPeerUpdateOmniBuf(payload);
-        } catch (err) {
-          resp.parse_error = err instanceof Error ? err.message : String(err);
-          return resp;
-        }
-        // Also exercise lazy OpaquePeerUpdate getters to verify zero-panic conformance
-        const op = new OpaquePeerUpdate(payload);
-        void op.getAsn();
-        void op.getRouterId();
-        void op.getActive();
-        void op.getSequence();
+        switch (req.message_type) {
+          case 'omnibuf.bench.PeerUpdate': {
+            let msg;
+            try {
+              msg = unmarshalPeerUpdateOmniBuf(payload);
+            } catch (err) {
+              resp.parse_error = err instanceof Error ? err.message : String(err);
+              return resp;
+            }
+            const op = new OpaquePeerUpdate(payload);
+            void op.getAsn();
+            void op.getRouterId();
+            void op.getActive();
+            void op.getUptimeSec();
+            void op.getRssiDbm();
+            void op.getCpuLoad();
+            void op.getTags();
+            void op.getPrefixes();
+            void op.getLocation()?.city;
+            void op.getNeighbors();
+            void op.getSequence();
 
-        if (req.test_opaque_splice) {
-          try {
-            op.setAsn(1_000_000);
-            op.setRouterId('edge-rtr-fra01-'.repeat(20));
-            op.setUptimeSec(0xffffffffffffffffn);
-            const curSeq = op.getSequence();
-            const nextSeq = BigInt.asUintN(
-              64,
-              (typeof curSeq === 'bigint' ? curSeq : BigInt(curSeq)) + 1n,
-            );
-            op.setSequence(nextSeq <= 9007199254740991n ? Number(nextSeq) : nextSeq);
-            resp.omnibuf_payload = op.marshal();
-          } catch (err) {
-            resp.serialize_error = err instanceof Error ? err.message : String(err);
+            if (req.test_opaque_splice) {
+              try {
+                op.setAsn(1_000_000);
+                op.setRouterId('edge-rtr-fra01-'.repeat(20));
+                op.setActive(!op.getActive());
+                op.setUptimeSec(0xffffffffffffffffn);
+                op.setRssiDbm(-1_000_000);
+                op.setCpuLoad(99.875);
+                op.setTags(['tag-grow-a', 'tag-grow-b', 'long-tag-'.repeat(20)]);
+                op.setPrefixes([100000, 200000, 300000, 400000, 500000, 600000]);
+                op.setLocation({
+                  $typeName: 'omnibuf.bench.Location',
+                  region: 'eu-central-grown',
+                  datacenter: 'fra-dc-'.repeat(25),
+                  city: 'Berlin',
+                  rack: 999999,
+                  latitude: 52.52,
+                  longitude: 13.405,
+                });
+                const curSeq = op.getSequence();
+                const nextSeq = BigInt.asUintN(
+                  64,
+                  (typeof curSeq === 'bigint' ? curSeq : BigInt(curSeq)) + 1n,
+                );
+                op.setSequence(nextSeq <= 9007199254740991n ? Number(nextSeq) : nextSeq);
+                resp.omnibuf_payload = op.marshal();
+              } catch (err) {
+                resp.serialize_error = err instanceof Error ? err.message : String(err);
+              }
+              return resp;
+            }
+
+            if (req.test_opaque_splice_shrink) {
+              try {
+                op.setAsn(1);
+                op.setRouterId('r');
+                op.setActive(false);
+                op.setUptimeSec(5);
+                op.setRssiDbm(-1);
+                op.setCpuLoad(0.5);
+                op.setTags(['t']);
+                op.setPrefixes([1]);
+                op.setLocation({
+                  $typeName: 'omnibuf.bench.Location',
+                  region: 'r',
+                  datacenter: 'd',
+                  city: 'c',
+                  rack: 1,
+                  latitude: 1.0,
+                  longitude: 2.0,
+                });
+                op.setSequence(2);
+                resp.omnibuf_payload = op.marshal();
+              } catch (err) {
+                resp.serialize_error = err instanceof Error ? err.message : String(err);
+              }
+              return resp;
+            }
+
+            try {
+              resp.omnibuf_payload = marshalPeerUpdateOmniBuf(msg, {
+                deterministic: true,
+                selfDescribing: Boolean(req.self_describing),
+              });
+            } catch (err) {
+              resp.serialize_error = err instanceof Error ? err.message : String(err);
+            }
+            return resp;
           }
-          return resp;
-        }
 
-        try {
-          resp.omnibuf_payload = marshalPeerUpdateOmniBuf(msg, {
-            deterministic: true,
-            selfDescribing: Boolean(req.self_describing),
-          });
-        } catch (err) {
-          resp.serialize_error = err instanceof Error ? err.message : String(err);
+          case 'omnibuf.conformance.TestAllTypes': {
+            let msg;
+            try {
+              msg = unmarshalTestAllTypesOmniBuf(payload);
+            } catch (err) {
+              resp.parse_error = err instanceof Error ? err.message : String(err);
+              return resp;
+            }
+            const op = new OpaqueTestAllTypes(payload);
+            void op.getF1Uint32();
+            void op.getF2Uint64();
+            void op.getF3Sint32();
+            void op.getF4Sint64();
+            void op.getF5Bool();
+            void op.getF6String();
+            void op.getF7Bytes();
+            void op.getF8SubMsg()?.label;
+            void op.getF9StringArr();
+            void op.getF10Uint32Arr();
+            void op.getF11SubMsgArr();
+            void op.getF12MapStrUint();
+            void op.getF13Float32();
+            void op.getF14Float64();
+            void op.getF15Fixed32();
+            void op.getF16Fixed64();
+            void op.getF20OverflowStr();
+
+            if (req.test_opaque_splice) {
+              try {
+                op.setF1Uint32(1_000_000);
+                op.setF2Uint64(0xffffffffffffffffn);
+                op.setF3Sint32(-1_000_000);
+                op.setF4Sint64(-9223372036854775808n);
+                op.setF5Bool(!op.getF5Bool());
+                op.setF6String('grown-str-'.repeat(30));
+                const f7 = new Uint8Array(260);
+                for (let i = 0; i < 260; i += 2) {
+                  f7[i] = 0xab;
+                  f7[i + 1] = 0xcd;
+                }
+                op.setF7Bytes(f7);
+                op.setF8SubMsg({
+                  $typeName: 'omnibuf.conformance.AllTypesSubMsg',
+                  id: 888888,
+                  label: 'sub-grown-'.repeat(20),
+                  flag: true,
+                  score: -999999999,
+                });
+                op.setF9StringArr(['arr-grow-1', 'arr-grow-2', 'arr-grow-3-'.repeat(15)]);
+                op.setF10Uint32Arr([100000, 200000, 300000, 400000, 500000]);
+                op.setF11SubMsgArr([
+                  {
+                    $typeName: 'omnibuf.conformance.AllTypesSubMsg',
+                    id: 100001,
+                    label: 'elem0-'.repeat(25),
+                    flag: true,
+                    score: -500000,
+                  },
+                  {
+                    $typeName: 'omnibuf.conformance.AllTypesSubMsg',
+                    id: 100002,
+                    label: 'elem1-grown',
+                    flag: false,
+                    score: 500000,
+                  },
+                ]);
+                op.setF12MapStrUint({
+                  k1: 1000000,
+                  k2: 0xffffffffffffffffn,
+                  k3_long_key: 424242,
+                });
+                op.setF13Float32(-1234.5);
+                op.setF14Float64(3.141592653589793);
+                op.setF15Fixed32(0xdeadbeef);
+                op.setF16Fixed64(0xcafebabedeadbeefn);
+                op.setF20OverflowStr('overflow20-'.repeat(20));
+                resp.omnibuf_payload = op.marshal();
+              } catch (err) {
+                resp.serialize_error = err instanceof Error ? err.message : String(err);
+              }
+              return resp;
+            }
+
+            if (req.test_opaque_splice_shrink) {
+              try {
+                op.setF1Uint32(1);
+                op.setF2Uint64(2);
+                op.setF3Sint32(-1);
+                op.setF4Sint64(-2);
+                op.setF5Bool(false);
+                op.setF6String('s');
+                op.setF7Bytes(new Uint8Array([0x01]));
+                op.setF8SubMsg({
+                  $typeName: 'omnibuf.conformance.AllTypesSubMsg',
+                  id: 1,
+                  label: 'x',
+                  flag: false,
+                  score: -1,
+                });
+                op.setF9StringArr(['a']);
+                op.setF10Uint32Arr([7]);
+                op.setF11SubMsgArr([
+                  {
+                    $typeName: 'omnibuf.conformance.AllTypesSubMsg',
+                    id: 1,
+                    label: 'e',
+                    flag: true,
+                    score: 1,
+                  },
+                ]);
+                op.setF12MapStrUint({ k: 1 });
+                op.setF13Float32(0.5);
+                op.setF14Float64(-0.25);
+                op.setF15Fixed32(7);
+                op.setF16Fixed64(9);
+                op.setF20OverflowStr('z');
+                resp.omnibuf_payload = op.marshal();
+              } catch (err) {
+                resp.serialize_error = err instanceof Error ? err.message : String(err);
+              }
+              return resp;
+            }
+
+            try {
+              resp.omnibuf_payload = marshalTestAllTypesOmniBuf(msg, {
+                deterministic: true,
+                selfDescribing: Boolean(req.self_describing),
+              });
+            } catch (err) {
+              resp.serialize_error = err instanceof Error ? err.message : String(err);
+            }
+            return resp;
+          }
+
+          default:
+            resp.skipped = 'plugin tier generated for PeerUpdate and TestAllTypes';
+            return resp;
         }
-        return resp;
       }
 
       case TestTierProtobufTypes: {
-        if (req.message_type !== 'omnibuf.bench.PeerUpdate') {
-          resp.skipped = 'protobuf types tier exercises pb.PeerUpdate';
+        const desc =
+          req.message_type === 'omnibuf.bench.PeerUpdate'
+            ? PeerUpdateProtobufDesc
+            : req.message_type === 'omnibuf.conformance.TestAllTypes'
+              ? TestAllTypesProtobufDesc
+              : null;
+        if (!desc) {
+          resp.skipped = 'protobuf types tier exercises pb.PeerUpdate and pb.TestAllTypes';
           return resp;
         }
         let msg;
         try {
-          msg = fromBinary(PeerUpdateProtobufDesc, payload);
+          msg = fromBinary(desc, payload);
         } catch (err) {
           resp.parse_error = err instanceof Error ? err.message : String(err);
           return resp;
         }
         try {
-          resp.omnibuf_payload = toBinary(PeerUpdateProtobufDesc, msg, {
+          resp.omnibuf_payload = toBinary(desc, msg, {
             deterministic: true,
             selfDescribing: Boolean(req.self_describing),
           });

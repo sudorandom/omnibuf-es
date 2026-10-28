@@ -43,6 +43,7 @@ import {
   readFrames,
   readPacketFileSync,
   unmarshalPeerUpdateOmniBuf,
+  unmarshalTestAllTypesOmniBuf,
   writeFrame,
 } from '../src/index.js';
 
@@ -321,10 +322,9 @@ describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conf
               : 'omnibuf.conformance.TestAllTypes';
 
       const tiers =
-        vec.schema === 'PeerUpdate'
+        vec.schema === 'PeerUpdate' || vec.schema === 'TestAllTypes'
           ? [TestTierPlugin, TestTierProtobufTypes, TestTierAnnotatedStruct]
           : [
-                'TestAllTypes',
                 'EmptyMessage',
                 'SparseField14',
                 'SelfDescribingSparse',
@@ -398,7 +398,66 @@ describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conf
             expect(splicedDec.routerId).toBe('edge-rtr-fra01-'.repeat(20));
             expect(BigInt(splicedDec.uptimeSec)).toBe(0xffffffffffffffffn);
             expect(BigInt(splicedDec.sequence)).toBe(nextSeq);
+
+            const respShrink = handleConformanceRequest({
+              test_name: `${vec.name}/Tier_${tier}/OpaqueSpliceShrink`,
+              message_type: canonicalType,
+              tier,
+              requested_output_format: WireFormatOmniBuf,
+              omnibuf_payload: rawWire,
+              test_opaque_splice_shrink: true,
+            });
+            expect(respShrink.parse_error).toBe('');
+            expect(respShrink.serialize_error).toBe('');
+            expect(respShrink.runtime_error).toBe('');
+            const shrunkDec = unmarshalPeerUpdateOmniBuf(respShrink.omnibuf_payload, {
+              readUnknownFields: false,
+            });
+            expect(shrunkDec.asn).toBe(1);
+            expect(shrunkDec.routerId).toBe('r');
+            expect(shrunkDec.active).toBe(false);
+            expect(shrunkDec.uptimeSec).toBe(5);
+            expect(shrunkDec.rssiDbm).toBe(-1);
+            expect(shrunkDec.sequence).toBe(2);
           }
+        } else if (vec.schema === 'TestAllTypes' && tier === TestTierPlugin) {
+          const respSplice = handleConformanceRequest({
+            test_name: `${vec.name}/Tier_${tier}/OpaqueSpliceGrow`,
+            message_type: canonicalType,
+            tier,
+            requested_output_format: WireFormatOmniBuf,
+            omnibuf_payload: rawWire,
+            test_opaque_splice: true,
+          });
+          expect(respSplice.parse_error).toBe('');
+          expect(respSplice.serialize_error).toBe('');
+          expect(respSplice.runtime_error).toBe('');
+          const grownDec = unmarshalTestAllTypesOmniBuf(respSplice.omnibuf_payload, {
+            readUnknownFields: false,
+          });
+          expect(grownDec.f1Uint32).toBe(1_000_000);
+          expect(BigInt(grownDec.f2Uint64)).toBe(0xffffffffffffffffn);
+          expect(grownDec.f3Sint32).toBe(-1_000_000);
+          expect(grownDec.f6String).toBe('grown-str-'.repeat(30));
+
+          const respShrink = handleConformanceRequest({
+            test_name: `${vec.name}/Tier_${tier}/OpaqueSpliceShrink`,
+            message_type: canonicalType,
+            tier,
+            requested_output_format: WireFormatOmniBuf,
+            omnibuf_payload: rawWire,
+            test_opaque_splice_shrink: true,
+          });
+          expect(respShrink.parse_error).toBe('');
+          expect(respShrink.serialize_error).toBe('');
+          expect(respShrink.runtime_error).toBe('');
+          const shrunkDec = unmarshalTestAllTypesOmniBuf(respShrink.omnibuf_payload, {
+            readUnknownFields: false,
+          });
+          expect(shrunkDec.f1Uint32).toBe(1);
+          expect(shrunkDec.f2Uint64).toBe(2);
+          expect(shrunkDec.f3Sint32).toBe(-1);
+          expect(shrunkDec.f6String).toBe('s');
         }
       }
     }

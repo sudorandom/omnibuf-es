@@ -14,6 +14,16 @@ import {
 export * from '@omnibuf/core';
 export * from './conformance.js';
 export * from './gen/peer_omnibuf.pb.js';
+export {
+  type AllTypesSubMsg,
+  type TestAllTypes,
+  OpaqueAllTypesSubMsg,
+  OpaqueTestAllTypes,
+  marshalAllTypesSubMsgOmniBuf,
+  unmarshalAllTypesSubMsgOmniBuf,
+  marshalTestAllTypesOmniBuf,
+  unmarshalTestAllTypesOmniBuf,
+} from './gen/conformance_omnibuf.pb.js';
 
 /**
  * Node.js-optimized `StringCodec` backed by `Buffer.from(str, 'utf8')`, `Buffer.byteLength`,
