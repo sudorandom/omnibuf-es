@@ -371,6 +371,34 @@ describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conf
           const [meta, ok] = readField0SchemaMeta(respSD.omnibuf_payload);
           expect(ok).toBe(true);
           expect(meta?.fields?.[2]).toBe('router_id');
+
+          if (tier === TestTierPlugin) {
+            const respSplice = handleConformanceRequest({
+              test_name: `${vec.name}/Tier_${tier}/OpaqueSpliceGrow`,
+              message_type: canonicalType,
+              tier,
+              requested_output_format: WireFormatOmniBuf,
+              omnibuf_payload: rawWire,
+              test_opaque_splice: true,
+            });
+            expect(respSplice.parse_error).toBe('');
+            expect(respSplice.serialize_error).toBe('');
+            expect(respSplice.runtime_error).toBe('');
+
+            const origDec = unmarshalPeerUpdateOmniBuf(rawWire, { readUnknownFields: false });
+            const origSeq = BigInt.asUintN(
+              64,
+              typeof origDec.sequence === 'bigint' ? origDec.sequence : BigInt(origDec.sequence),
+            );
+            const nextSeq = BigInt.asUintN(64, origSeq + 1n);
+            const splicedDec = unmarshalPeerUpdateOmniBuf(respSplice.omnibuf_payload, {
+              readUnknownFields: false,
+            });
+            expect(splicedDec.asn).toBe(1_000_000);
+            expect(splicedDec.routerId).toBe('edge-rtr-fra01-'.repeat(20));
+            expect(BigInt(splicedDec.uptimeSec)).toBe(0xffffffffffffffffn);
+            expect(BigInt(splicedDec.sequence)).toBe(nextSeq);
+          }
         }
       }
     }
@@ -456,5 +484,36 @@ describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conf
     expect(decoded.neighbors[0]?.peerAsn).toBe(3356);
     expect(decoded.neighbors[0]?.peer_asn).toBe(3356);
     expect(decoded.sequence).toBe(9876543211);
+
+    // Grow middle fields across Prefix-Varint byte-width boundaries (1B->4B, 1B->2B len, 4B->9B)
+    const longRouter = 'edge-rtr-fra01-'.repeat(20);
+    const opGrow = new OpaquePeerUpdate(updatedBytes);
+    opGrow.setAsn(1_000_000);
+    opGrow.setRouterId(longRouter);
+    opGrow.setUptimeSec(0xffffffffffffffffn);
+    const grownBytes = opGrow.marshal();
+    expect(grownBytes.byteLength > updatedBytes.byteLength).toBe(true);
+
+    const grownView = new OpaquePeerUpdate(grownBytes);
+    expect(grownView.getAsn()).toBe(1_000_000);
+    expect(grownView.getRouterId()).toBe(longRouter);
+    expect(BigInt(grownView.getUptimeSec())).toBe(0xffffffffffffffffn);
+    expect(grownView.getLocation()?.city).toBe('Frankfurt');
+    expect(grownView.getNeighbors()[0]?.router).toBe('ae0.fra1.level3.net');
+    expect(grownView.getSequence()).toBe(9876543211);
+
+    // Shrink middle fields back down (4B->1B, 2B->1B len, 9B->1B)
+    grownView.setAsn(1);
+    grownView.setRouterId('r');
+    grownView.setUptimeSec(5);
+    const shrunkBytes = grownView.marshal();
+    expect(shrunkBytes.byteLength < updatedBytes.byteLength).toBe(true);
+
+    const shrunkDec = unmarshalPeerUpdateOmniBuf(shrunkBytes);
+    expect(shrunkDec.asn).toBe(1);
+    expect(shrunkDec.routerId).toBe('r');
+    expect(shrunkDec.uptimeSec).toBe(5);
+    expect(shrunkDec.location?.city).toBe('Frankfurt');
+    expect(shrunkDec.sequence).toBe(9876543211);
   });
 });

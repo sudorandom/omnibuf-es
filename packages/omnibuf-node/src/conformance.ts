@@ -35,6 +35,7 @@ export interface ConformanceRequest {
   omnibuf_payload: Uint8Array;
   json_payload: string;
   self_describing: boolean;
+  test_opaque_splice: boolean;
 }
 
 export interface ConformanceResponse {
@@ -55,6 +56,7 @@ export const ConformanceRequestSchema: MessageSchema<ConformanceRequest> =
     omnibuf_payload: { fieldNum: 5, type: 'bytes' },
     json_payload: { fieldNum: 6, type: 'string' },
     self_describing: { fieldNum: 7, type: 'bool' },
+    test_opaque_splice: { fieldNum: 8, type: 'bool' },
   });
 
 export const ConformanceResponseSchema: MessageSchema<ConformanceResponse> =
@@ -478,6 +480,24 @@ export function handleConformanceRequest(
         void op.getRouterId();
         void op.getActive();
         void op.getSequence();
+
+        if (req.test_opaque_splice) {
+          try {
+            op.setAsn(1_000_000);
+            op.setRouterId('edge-rtr-fra01-'.repeat(20));
+            op.setUptimeSec(0xffffffffffffffffn);
+            const curSeq = op.getSequence();
+            const nextSeq = BigInt.asUintN(
+              64,
+              (typeof curSeq === 'bigint' ? curSeq : BigInt(curSeq)) + 1n,
+            );
+            op.setSequence(nextSeq <= 9007199254740991n ? Number(nextSeq) : nextSeq);
+            resp.omnibuf_payload = op.marshal();
+          } catch (err) {
+            resp.serialize_error = err instanceof Error ? err.message : String(err);
+          }
+          return resp;
+        }
 
         try {
           resp.omnibuf_payload = marshalPeerUpdateOmniBuf(msg, {

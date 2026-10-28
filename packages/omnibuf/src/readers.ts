@@ -1385,13 +1385,15 @@ export function spliceFields(
         pos = skipValue(raw, pos, wt);
         const fieldEnd = pos;
 
-        const bit = fnum <= maxField ? 1 << fnum : 0;
+        const bit = fnum >= 1 && fnum <= maxField ? 1 << fnum : 0;
         if ((mask32 & bit) !== 0) {
           if (cleanStart < fieldStart) {
             activeEnc.writeRaw(raw.subarray(cleanStart, fieldStart));
           }
-          if ((emitted32 & bit) === 0) appendDirty(activeEnc, fnum);
-          emitted32 |= bit;
+          if ((emitted32 & bit) === 0) {
+            appendDirty(activeEnc, fnum);
+            emitted32 |= bit;
+          }
           cleanStart = fieldEnd;
         } else {
           emitted32 |= bit;
@@ -1437,13 +1439,15 @@ export function spliceFields(
     pos = skipValue(raw, pos + width, wt);
     const fieldEnd = pos;
 
-    const bit = fnum <= maxField ? 1n << BigInt(fnum) : 0n;
+    const bit = fnum >= 1 && fnum <= maxField ? 1n << BigInt(fnum) : 0n;
     if ((mask & bit) !== 0n) {
       if (cleanStart < fieldStart) {
         activeEnc.writeRaw(raw.subarray(cleanStart, fieldStart));
       }
-      if ((emitted & bit) === 0n) appendDirty(activeEnc, fnum);
-      emitted |= bit;
+      if ((emitted & bit) === 0n) {
+        appendDirty(activeEnc, fnum);
+        emitted |= bit;
+      }
       cleanStart = fieldEnd;
     } else {
       emitted |= bit;
