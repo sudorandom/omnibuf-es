@@ -1231,6 +1231,25 @@ export class MessageSchema<
       } else if (!('$typeName' in out)) {
         Object.defineProperty(out, '$typeName', this.typeNameDesc);
       }
+      if (!options?.merge) {
+        for (let i = 0; i < this.oneofs.length; i++) {
+          out[this.oneofs[i]!.localName] = { case: undefined };
+        }
+        let nextCreating: Set<MessageSchema<any>> | undefined;
+        if (this.isCyclicOrDeep()) {
+          nextCreating = new Set<MessageSchema<any>>([this]);
+        }
+        for (let i = 0; i < this.fields.length; i++) {
+          const f = this.fields[i]!;
+          if (f.oneof) continue;
+          if (f.explicitPresence) {
+            out[f.propKey] = undefined;
+          } else {
+            out[f.propKey] = defaultFieldValue(f, nextCreating);
+          }
+        }
+        delete out.$unknown;
+      }
     }
     const n = data.length;
     let pos = 0;

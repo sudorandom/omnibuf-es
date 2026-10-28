@@ -532,3 +532,114 @@ it('differential equivalence across MessageSchema, DescriptorRegistry, Opaque re
   assert.equal(blind.kind, -5);
   assert.deepEqual(blind.kinds, [-5, 7]);
 });
+
+it('decodes 1-byte Prefix-Varint odd lengths on submsg and array containers without confusing bit 1 with 2-byte varint', async () => {
+  const {
+    WireArray,
+    WireString,
+    WireSubMsg,
+    WireUint,
+    countSubMsgArrElems,
+    decodeBlind,
+    defineMessage,
+    readElem,
+    readSubMsgArrDecoded,
+    readSubMsgArrElem,
+    readSubMsgMerged,
+    subMsgArrLen,
+    writeVarintAt,
+  } = await import('../src/index.js');
+
+  const SubSchema = defineMessage<{ id: number }>('OddSub', {
+    id: { fieldNum: 1, type: 'uint32' },
+  });
+  const ParentSchema = defineMessage<{
+    sub: { id: number } | null;
+    strs: string[];
+    nums: number[];
+    subs: Array<{ id: number }>;
+  }>('OddParent', {
+    sub: { fieldNum: 1, type: 'submsg', subSchema: () => SubSchema },
+    strs: { fieldNum: 2, type: 'string[]' },
+    nums: { fieldNum: 3, type: 'uint32[]' },
+    subs: { fieldNum: 4, type: 'submsg[]', subSchema: () => SubSchema },
+  });
+
+  // 3-byte submsg body: field #1 (WireUint = 0) -> tag = 16 -> 1B varint (16<<1)|1 = 0x21, value = 300 -> 2B varint ((300<<2)|2) = [0xb2, 0x04]
+  // Total submsg byte length = 3 (odd! 1-byte prefix varint is (3<<1)|1 = 0x07, where both bit 0 and bit 1 are 1)
+  const subBody3 = new Uint8Array([0x21, 0xb2, 0x04]);
+  assert.equal(subBody3.length, 3);
+
+  // Field #1: WireSubMsg (12), 1-byte odd length = 3 -> header byte 0x07
+  // Field #2: WireArray (13) of strings, 1-byte odd length = 5 -> header byte 0x0b: [WireString(10), count=1 (0x03), strLen=2 (0x05), 'h', 'i']
+  // Field #3: WireArray (13) of uint32, 1-byte odd length = 3 -> header byte 0x07: [WireUint(0), count=1 (0x03), val=42 (0x55)]
+  // Field #4: WireArray (13) of submsg, 1-byte odd length = 6 -> header byte 0x0d, containing 1 element whose 1-byte length is 3 (odd! 0x07) followed by subBody3
+  // Also append a second Field #4 WireArray with odd outer length = 5 -> header byte 0x0b, containing 1 element of odd length = 2?Wait: 2+1+2 = 5 (outer odd!) and first array has inner odd (3)!
+  const subBody2 = new Uint8Array([0x21, (7 << 1) | 1]); // id = 7 (2 bytes)
+  const arrSubs1Payload = new Uint8Array([WireSubMsg, (1 << 1) | 1, (3 << 1) | 1, ...subBody3]); // 6 bytes total, inner elem len = 3 (odd 1B varint 0x07)
+  const arrSubs2Payload = new Uint8Array([WireSubMsg, (1 << 1) | 1, (2 << 1) | 1, ...subBody2]); // 5 bytes total (odd outer 1B varint 0x0b)
+
+  const varintBytes = (v: number): Uint8Array => {
+    const tmp = new Uint8Array(9);
+    return tmp.subarray(0, writeVarintAt(tmp, 0, v));
+  };
+
+  const packet = new Uint8Array([
+    ...varintBytes((1 << 4) | WireSubMsg),
+    (subBody3.length << 1) | 1, // 0x07 (odd 1B varint)
+    ...subBody3,
+
+    ...varintBytes((2 << 4) | WireArray),
+    (5 << 1) | 1, // 0x0b (odd 1B varint, len=5)
+    WireString,
+    (1 << 1) | 1,
+    (2 << 1) | 1,
+    0x68,
+    0x69,
+
+    ...varintBytes((3 << 4) | WireArray),
+    (3 << 1) | 1, // 0x07 (odd 1B varint, len=3)
+    WireUint,
+    (1 << 1) | 1,
+    (42 << 1) | 1,
+
+    ...varintBytes((4 << 4) | WireArray),
+    (arrSubs1Payload.length << 1) | 1,
+    ...arrSubs1Payload,
+
+    ...varintBytes((4 << 4) | WireArray),
+    (arrSubs2Payload.length << 1) | 1, // 0x0b (odd 1B varint, len=5)
+    ...arrSubs2Payload,
+  ]);
+
+  // 1. Direct reader helpers on odd-length 1-byte Prefix-Varint submsg array
+  assert.deepEqual(countSubMsgArrElems(arrSubs1Payload), [1, true]);
+  assert.deepEqual(readElem(arrSubs1Payload, 0), [subBody3, true]);
+  assert.equal(subMsgArrLen(packet, 4), 2);
+  assert.deepEqual(readSubMsgArrElem(packet, 4, 0), [subBody3, true]);
+  assert.deepEqual(readSubMsgArrElem(packet, 4, 1), [subBody2, true]);
+  assert.deepEqual(
+    readSubMsgArrDecoded(packet, 4, (b) => SubSchema.decode(b)),
+    [[{ id: 300 }, { id: 7 }], true],
+  );
+  assert.deepEqual(
+    readSubMsgMerged(packet, 1, (b, t, m) => SubSchema.decode(b, t, 0, { merge: m })),
+    [{ id: 300 }, true],
+  );
+
+  // 2. Blind decoder
+  const blind = decodeBlind(packet) as any;
+  assert.deepEqual(blind, {
+    field_1: { field_1: 300 },
+    field_2: ['hi'],
+    field_3: [42],
+    field_4: [{ field_1: 300 }, { field_1: 7 }],
+  });
+
+  // 3. MessageSchema.decode
+  const decoded = ParentSchema.decode(packet);
+  assert.deepEqual(decoded.sub, { id: 300 });
+  assert.deepEqual(decoded.strs, ['hi']);
+  assert.deepEqual(decoded.nums, [42]);
+  assert.deepEqual(decoded.subs, [{ id: 300 }, { id: 7 }]);
+});

@@ -236,15 +236,46 @@ export function readSubMsg(
   packet: Uint8Array,
   fieldNum: number,
 ): [subPacket: Uint8Array, ok: boolean] {
-  const { valSlice, wireType, ok } = locateField(packet, fieldNum);
-  if (!ok || wireType !== WireSubMsg) {
+  let pos = 0;
+  let first: Uint8Array | null = null;
+  let chunks: Uint8Array[] | null = null;
+  let totalLen = 0;
+  while (true) {
+    const { body, nextPos, matched, valid } = nextContainerField(
+      packet,
+      pos,
+      fieldNum,
+      WireSubMsg,
+      0,
+    );
+    if (!valid) return [new Uint8Array(0), false];
+    if (!matched) break;
+    pos = nextPos;
+    if (first === null) {
+      first = body;
+      totalLen = body.length;
+    } else {
+      if (chunks === null) {
+        chunks = [first];
+      }
+      chunks.push(body);
+      totalLen += body.length;
+    }
+  }
+  if (first === null) {
     return [new Uint8Array(0), false];
   }
-  const [subLen, sn] = decodeVarintBigInt(valSlice, 0);
-  if (sn === 0 || subLen > BigInt(valSlice.length - sn)) {
-    return [new Uint8Array(0), false];
+  if (chunks === null) {
+    return [first, true];
   }
-  return [valSlice.subarray(sn, sn + Number(subLen)), true];
+  const merged = new Uint8Array(totalLen);
+  let off = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i]!;
+    merged.set(c, off);
+    off += c.length;
+  }
+  return [merged, true];
 }
 
 export function readElem(arrPayload: Uint8Array, index: number): [elem: Uint8Array, ok: boolean] {
@@ -260,7 +291,10 @@ export function readElem(arrPayload: Uint8Array, index: number): [elem: Uint8Arr
     let elemLen = 0;
     let en = 0;
     const b0 = arrPayload[pos]!;
-    if ((b0 & 2) !== 0) {
+    if ((b0 & 1) !== 0) {
+      elemLen = b0 >>> 1;
+      en = 1;
+    } else if ((b0 & 2) !== 0) {
       if (pos + 2 > n) return [new Uint8Array(0), false];
       elemLen = ((b0 | (arrPayload[pos + 1]! << 8)) >>> 2) | 0;
       en = 2;
@@ -294,15 +328,15 @@ export function countSubMsgArrElems(arrPayload: Uint8Array): [count: number, ok:
   for (let i = 0; i < count; i++) {
     if (pos >= n) return [0, false];
     const b0 = arrPayload[pos]!;
+    if ((b0 & 1) !== 0) {
+      pos += 1 + (b0 >>> 1);
+      if (pos > n) return [0, false];
+      continue;
+    }
     if ((b0 & 2) !== 0) {
       if (pos + 2 > n) return [0, false];
       const el = (b0 | (arrPayload[pos + 1]! << 8)) >>> 2;
       pos += 2 + el;
-      if (pos > n) return [0, false];
-      continue;
-    }
-    if ((b0 & 1) !== 0) {
-      pos += 1 + (b0 >>> 1);
       if (pos > n) return [0, false];
       continue;
     }
@@ -1014,13 +1048,13 @@ export function readSubMsgMerged<T>(
       if (wt !== WireSubMsg || pos >= n) return [null, false];
       let lenNum = 0;
       const lb = packet[pos]!;
-      if ((lb & 2) !== 0) {
+      if ((lb & 1) !== 0) {
+        lenNum = lb >>> 1;
+        pos += 1;
+      } else if ((lb & 2) !== 0) {
         if (pos + 2 > n) return [null, false];
         lenNum = (lb | (packet[pos + 1]! << 8)) >>> 2;
         pos += 2;
-      } else if ((lb & 1) !== 0) {
-        lenNum = lb >>> 1;
-        pos += 1;
       } else {
         const [bLen, bBytes] = decodeVarintBigInt(packet, pos);
         if (bBytes === 0 || bLen > BigInt(n - (pos + bBytes))) return [null, false];

@@ -161,6 +161,10 @@ export function decodeAllTypesSubMsg(
     throw new Error(`omnibuf: nesting depth ${depth} exceeds MaxNestingDepth (${maxDepth})`);
   }
   const out: AllTypesSubMsg = target ?? new AllTypesSubMsgMsg();
+  if (target !== undefined && !options?.merge) {
+    Object.assign(out, new AllTypesSubMsgMsg());
+    delete (out as any).$unknown;
+  }
   const n = endPos;
   let pos = startPos;
   let seenMask = 0;
@@ -771,6 +775,10 @@ export function decodeTestAllTypes(
     throw new Error(`omnibuf: nesting depth ${depth} exceeds MaxNestingDepth (${maxDepth})`);
   }
   const out: TestAllTypes = target ?? new TestAllTypesMsg();
+  if (target !== undefined && !options?.merge) {
+    Object.assign(out, new TestAllTypesMsg());
+    delete (out as any).$unknown;
+  }
   const n = endPos;
   let pos = startPos;
   let seenMask = 0;
@@ -1050,21 +1058,22 @@ export function decodeTestAllTypes(
         if (pos >= n) throw new Error('omnibuf: truncated submsg');
         let subLen = 0;
         const lb = buf[pos]!;
-        if ((lb & 2) !== 0) {
+        if ((lb & 1) !== 0) {
+          subLen = lb >>> 1;
+          pos += 1;
+        } else if ((lb & 2) !== 0) {
           if (pos + 2 > n) throw new Error('omnibuf: truncated submsg');
           subLen = (lb | (buf[pos + 1]! << 8)) >>> 2;
           pos += 2;
-        } else if ((lb & 1) !== 0) {
-          subLen = lb >>> 1;
-          pos += 1;
         } else {
           const [subBytes, nextPos] = readLenSlice(buf, pos, 0, n);
           const existing = out.f8SubMsg;
+          const doMerge = alreadySeen;
           const decodedSub = decodeAllTypesSubMsg(
             subBytes,
-            existing ?? undefined,
+            doMerge ? (existing ?? undefined) : undefined,
             depth + 1,
-            alreadySeen ? { ...options, merge: true } : options,
+            doMerge ? { ...options, merge: true } : options,
           );
           out.f8SubMsg = decodedSub;
           pos = nextPos;
@@ -1072,11 +1081,12 @@ export function decodeTestAllTypes(
         }
         if (pos + subLen > n) throw new Error('omnibuf: truncated submsg');
         const existing = out.f8SubMsg;
+        const doMerge = alreadySeen;
         const decodedSub = decodeAllTypesSubMsg(
           buf,
-          existing ?? undefined,
+          doMerge ? (existing ?? undefined) : undefined,
           depth + 1,
-          alreadySeen ? { ...options, merge: true } : options,
+          doMerge ? { ...options, merge: true } : options,
           pos,
           pos + subLen,
         );
@@ -1102,13 +1112,13 @@ export function decodeTestAllTypes(
         if (pos >= n) throw new Error('omnibuf: invalid string array');
         const lb = buf[pos]!;
         let bodyLen = 0;
-        if ((lb & 2) !== 0) {
+        if ((lb & 1) !== 0) {
+          bodyLen = lb >>> 1;
+          pos += 1;
+        } else if ((lb & 2) !== 0) {
           if (pos + 2 > n) throw new Error('omnibuf: invalid string array');
           bodyLen = (lb | (buf[pos + 1]! << 8)) >>> 2;
           pos += 2;
-        } else if ((lb & 1) !== 0) {
-          bodyLen = lb >>> 1;
-          pos += 1;
         } else {
           const [body, nextPos] = readLenSlice(buf, pos, 2, n);
           const prev = alreadySeen && Array.isArray(out.f9StringArr) ? out.f9StringArr : [];
@@ -1179,13 +1189,13 @@ export function decodeTestAllTypes(
         if (pos >= n) throw new Error('omnibuf: invalid uint32 array');
         const lb = buf[pos]!;
         let bodyLen = 0;
-        if ((lb & 2) !== 0) {
+        if ((lb & 1) !== 0) {
+          bodyLen = lb >>> 1;
+          pos += 1;
+        } else if ((lb & 2) !== 0) {
           if (pos + 2 > n) throw new Error('omnibuf: invalid uint32 array');
           bodyLen = (lb | (buf[pos + 1]! << 8)) >>> 2;
           pos += 2;
-        } else if ((lb & 1) !== 0) {
-          bodyLen = lb >>> 1;
-          pos += 1;
         } else {
           const [body, nextPos] = readLenSlice(buf, pos, 2, n);
           const prev = alreadySeen && Array.isArray(out.f10Uint32Arr) ? out.f10Uint32Arr : [];
@@ -1262,13 +1272,13 @@ export function decodeTestAllTypes(
         if (pos >= n) throw new Error('omnibuf: corrupt submsg array');
         let arrLen = 0;
         const lb = buf[pos]!;
-        if ((lb & 2) !== 0) {
+        if ((lb & 1) !== 0) {
+          arrLen = lb >>> 1;
+          pos += 1;
+        } else if ((lb & 2) !== 0) {
           if (pos + 2 > n) throw new Error('omnibuf: corrupt submsg array');
           arrLen = (lb | (buf[pos + 1]! << 8)) >>> 2;
           pos += 2;
-        } else if ((lb & 1) !== 0) {
-          arrLen = lb >>> 1;
-          pos += 1;
         } else {
           const [arrPayload, nextPos] = readLenSlice(buf, pos, 2, n);
           const [elemCount, ok] = countSubMsgArrElems(arrPayload);
@@ -1305,13 +1315,13 @@ export function decodeTestAllTypes(
             if (p >= arrEnd) throw new Error('omnibuf: corrupt submsg array');
             let elNum = 0;
             const eb0 = buf[p]!;
-            if ((eb0 & 2) !== 0) {
+            if ((eb0 & 1) !== 0) {
+              elNum = eb0 >>> 1;
+              p += 1;
+            } else if ((eb0 & 2) !== 0) {
               if (p + 2 > arrEnd) throw new Error('omnibuf: corrupt submsg array');
               elNum = (eb0 | (buf[p + 1]! << 8)) >>> 2;
               p += 2;
-            } else if ((eb0 & 1) !== 0) {
-              elNum = eb0 >>> 1;
-              p += 1;
             } else {
               const [el, en] = decodeVarintBigInt(buf, p, arrEnd);
               if (en === 0 || el > BigInt(arrEnd - (p + en)))

@@ -13,13 +13,18 @@ import {
 import {
   OpaquePeerUpdate,
   PeerUpdateSchema,
+  createLocation,
+  createNeighbor,
+  createPeerUpdate,
+  decodePeerUpdate,
   marshalPeerUpdateOmniBuf,
-  unmarshalPeerUpdateOmniBuf,
 } from './gen/peer_omnibuf.pb.js';
 import {
   OpaqueTestAllTypes,
+  createAllTypesSubMsg,
+  createTestAllTypes,
+  decodeTestAllTypes,
   marshalTestAllTypesOmniBuf,
-  unmarshalTestAllTypesOmniBuf,
 } from './gen/conformance_omnibuf.pb.js';
 
 export const WireFormatUnspecified = 0;
@@ -636,25 +641,40 @@ export function handleConformanceRequest(
       case TestTierPlugin: {
         switch (req.message_type) {
           case 'omnibuf.bench.PeerUpdate': {
-            let msg;
+            const msg = createPeerUpdate({
+              asn: 999999,
+              routerId: 'stale-router',
+              active: true,
+              tags: ['stale-tag'],
+              prefixes: [999],
+              location: createLocation({ region: 'stale', city: 'stale-city', rack: 999 }),
+              neighbors: [createNeighbor({ peerAsn: 999, router: 'stale-neighbor' })],
+              sequence: 999999,
+            });
             try {
-              msg = unmarshalPeerUpdateOmniBuf(payload);
+              decodePeerUpdate(payload, msg);
             } catch (err) {
               resp.parse_error = err instanceof Error ? err.message : String(err);
               return resp;
             }
             const op = new OpaquePeerUpdate(payload);
-            void op.getAsn();
-            void op.getRouterId();
-            void op.getActive();
-            void op.getUptimeSec();
-            void op.getRssiDbm();
-            void op.getCpuLoad();
-            void op.getTags();
-            void op.getPrefixes();
-            void op.getLocation()?.city;
-            void op.getNeighbors();
-            void op.getSequence();
+            const opLoc = op.getLocation();
+            if (
+              op.getAsn() !== msg.asn ||
+              op.getRouterId() !== msg.routerId ||
+              op.getActive() !== msg.active ||
+              BigInt(op.getUptimeSec()) !== BigInt(msg.uptimeSec) ||
+              op.getRssiDbm() !== msg.rssiDbm ||
+              !Object.is(op.getCpuLoad(), msg.cpuLoad) ||
+              op.getTags().length !== msg.tags.length ||
+              op.getPrefixes().length !== msg.prefixes.length ||
+              (opLoc?.city ?? '') !== (msg.location?.city ?? '') ||
+              op.getNeighbors().length !== msg.neighbors.length ||
+              BigInt(op.getSequence()) !== BigInt(msg.sequence)
+            ) {
+              resp.parse_error = 'opaque PeerUpdate getter mismatch with decoded struct';
+              return resp;
+            }
 
             if (req.test_opaque_splice) {
               try {
@@ -727,31 +747,67 @@ export function handleConformanceRequest(
           }
 
           case 'omnibuf.conformance.TestAllTypes': {
-            let msg;
+            const msg = createTestAllTypes({
+              f1Uint32: 999999,
+              f5Bool: true,
+              f6String: 'stale-str',
+              f7Bytes: new Uint8Array([0xff]),
+              f8SubMsg: createAllTypesSubMsg({
+                id: 999,
+                label: 'stale-sub',
+                flag: true,
+                score: -999,
+              }),
+              f9StringArr: ['stale'],
+              f10Uint32Arr: [999],
+              f11SubMsgArr: [createAllTypesSubMsg({ id: 999, label: 'stale-elem' })],
+              f12MapStrUint: { stale: 999 },
+              f20OverflowStr: 'stale-overflow',
+            });
             try {
-              msg = unmarshalTestAllTypesOmniBuf(payload);
+              decodeTestAllTypes(payload, msg);
             } catch (err) {
               resp.parse_error = err instanceof Error ? err.message : String(err);
               return resp;
             }
             const op = new OpaqueTestAllTypes(payload);
-            void op.getF1Uint32();
-            void op.getF2Uint64();
-            void op.getF3Sint32();
-            void op.getF4Sint64();
-            void op.getF5Bool();
-            void op.getF6String();
-            void op.getF7Bytes();
-            void op.getF8SubMsg()?.label;
-            void op.getF9StringArr();
-            void op.getF10Uint32Arr();
-            void op.getF11SubMsgArr();
             void op.getF12MapStrUint();
-            void op.getF13Float32();
-            void op.getF14Float64();
-            void op.getF15Fixed32();
-            void op.getF16Fixed64();
-            void op.getF20OverflowStr();
+            const opSub = op.getF8SubMsg();
+            const wantSub = msg.f8SubMsg;
+            const opBytes = op.getF7Bytes();
+            let bytesMatch = opBytes.length === msg.f7Bytes.length;
+            if (bytesMatch) {
+              for (let i = 0; i < opBytes.length; i++) {
+                if (opBytes[i] !== msg.f7Bytes[i]) {
+                  bytesMatch = false;
+                  break;
+                }
+              }
+            }
+            if (
+              op.getF1Uint32() !== msg.f1Uint32 ||
+              BigInt(op.getF2Uint64()) !== BigInt(msg.f2Uint64) ||
+              op.getF3Sint32() !== msg.f3Sint32 ||
+              BigInt(op.getF4Sint64()) !== BigInt(msg.f4Sint64) ||
+              op.getF5Bool() !== msg.f5Bool ||
+              op.getF6String() !== msg.f6String ||
+              !bytesMatch ||
+              (opSub?.id ?? 0) !== (wantSub?.id ?? 0) ||
+              (opSub?.label ?? '') !== (wantSub?.label ?? '') ||
+              (opSub?.flag ?? false) !== (wantSub?.flag ?? false) ||
+              BigInt(opSub?.score ?? 0) !== BigInt(wantSub?.score ?? 0) ||
+              op.getF9StringArr().length !== msg.f9StringArr.length ||
+              op.getF10Uint32Arr().length !== msg.f10Uint32Arr.length ||
+              op.getF11SubMsgArr().length !== msg.f11SubMsgArr.length ||
+              !Object.is(op.getF13Float32(), msg.f13Float32) ||
+              !Object.is(op.getF14Float64(), msg.f14Float64) ||
+              op.getF15Fixed32() !== msg.f15Fixed32 ||
+              BigInt(op.getF16Fixed64()) !== BigInt(msg.f16Fixed64) ||
+              op.getF20OverflowStr() !== msg.f20OverflowStr
+            ) {
+              resp.parse_error = 'opaque TestAllTypes getter mismatch with decoded struct';
+              return resp;
+            }
 
             if (req.test_opaque_splice) {
               try {

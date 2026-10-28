@@ -575,4 +575,154 @@ describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conf
     expect(shrunkDec.location?.city).toBe('Frankfurt');
     expect(shrunkDec.sequence).toBe(9876543211);
   });
+
+  it('decodes 1-byte Prefix-Varint odd length containers in generated decodeTestAllTypes and OpaqueTestAllTypes', async () => {
+    const { WireArray, WireString, WireSubMsg, WireUint, writeVarintAt } =
+      await import('@omnibuf/core');
+    const { OpaqueTestAllTypes } = await import('../src/index.js');
+
+    // Submsg body of odd length 3: id (#1, WireUint=0) = 300 -> [0x21, 0xb2, 0x04]
+    const subBody3 = new Uint8Array([0x21, 0xb2, 0x04]);
+    // Submsg body of length 2: id (#1, WireUint=0) = 9 -> [0x21, 0x13]
+    const subBody2 = new Uint8Array([0x21, (9 << 1) | 1]);
+
+    // f8SubMsg (#8, WireSubMsg=12): 1-byte odd length = 3 (0x07)
+    // f9StringArr (#9, WireArray=13): 1-byte odd length = 5 (0x0b) -> [WireString(10), count=1(0x03), len=2(0x05), 'o', 'k']
+    // f10Uint32Arr (#10, WireArray=13): 1-byte odd length = 3 (0x07) -> [WireUint(0), count=1(0x03), val=11(0x17)]
+    // f11SubMsgArr (#11, WireArray=13):
+    //   occurrence 1: outer len = 6 (0x0d), inner elem 1B odd len = 3 (0x07) + subBody3
+    //   occurrence 2: outer 1B odd len = 5 (0x0b), inner elem 1B len = 2 (0x05) + subBody2
+    const varintBytes = (v: number): Uint8Array => {
+      const tmp = new Uint8Array(9);
+      return tmp.subarray(0, writeVarintAt(tmp, 0, v));
+    };
+
+    const wire = new Uint8Array([
+      ...varintBytes((8 << 4) | WireSubMsg),
+      (3 << 1) | 1,
+      ...subBody3,
+
+      ...varintBytes((9 << 4) | WireArray),
+      (5 << 1) | 1,
+      WireString,
+      (1 << 1) | 1,
+      (2 << 1) | 1,
+      0x6f,
+      0x6b,
+
+      ...varintBytes((10 << 4) | WireArray),
+      (3 << 1) | 1,
+      WireUint,
+      (1 << 1) | 1,
+      (11 << 1) | 1,
+
+      ...varintBytes((11 << 4) | WireArray),
+      (6 << 1) | 1,
+      WireSubMsg,
+      (1 << 1) | 1,
+      (3 << 1) | 1,
+      ...subBody3,
+
+      ...varintBytes((11 << 4) | WireArray),
+      (5 << 1) | 1,
+      WireSubMsg,
+      (1 << 1) | 1,
+      (2 << 1) | 1,
+      ...subBody2,
+    ]);
+
+    const decoded = unmarshalTestAllTypesOmniBuf(wire);
+    expect(decoded.f8SubMsg?.id).toBe(300);
+    expect(decoded.f9StringArr).toEqual(['ok']);
+    expect(decoded.f10Uint32Arr).toEqual([11]);
+    expect(decoded.f11SubMsgArr.map((x) => x.id)).toEqual([300, 9]);
+
+    const opaque = new OpaqueTestAllTypes(wire);
+    expect(opaque.getF8SubMsg()?.id).toBe(300);
+    expect(opaque.getF9StringArr()).toEqual(['ok']);
+    expect(opaque.getF10Uint32Arr()).toEqual([11]);
+    expect(opaque.getF11SubMsgArr().map((x) => x.id)).toEqual([300, 9]);
+  });
+
+  it('merges concatenated sub-messages in readSubMsg/Opaque, resets unseen fields on target reuse, and rejects mismatched fixed array types', async () => {
+    const {
+      Encoder,
+      concatMessages,
+      readBool,
+      readFixed32Arr,
+      readFixed64Arr,
+      readInt,
+      readSfixed32Arr,
+      readSfixed64Arr,
+      readString,
+      readSubMsg,
+      readUint,
+    } = await import('@omnibuf/core');
+    const {
+      OpaqueTestAllTypes,
+      TestAllTypesSchema,
+      createAllTypesSubMsg,
+      createTestAllTypes,
+      decodeTestAllTypes,
+    } = await import('../src/index.js');
+
+    // 1. Concatenated packets with partial sub-messages merge in readSubMsg and Opaque getters
+    const encA = new Encoder(64);
+    encA.beginSubMsg(8);
+    encA.writeUint(1, 10);
+    encA.writeString(2, 'from-A');
+    encA.writeBool(3, true);
+    encA.endSubMsg();
+
+    const encB = new Encoder(64);
+    encB.beginSubMsg(8);
+    encB.writeUint(1, 20);
+    encB.writeInt(4, -555);
+    encB.endSubMsg();
+
+    const concat = concatMessages(encA.finish(), encB.finish());
+    const [subConcat, subOk] = readSubMsg(concat, 8);
+    expect(subOk).toBe(true);
+    expect(readUint(subConcat, 1)).toEqual([20, true]);
+    expect(readString(subConcat, 2)).toEqual(['from-A', true]);
+    expect(readBool(subConcat, 3)).toEqual([true, true]);
+    expect(readInt(subConcat, 4)).toEqual([-555, true]);
+
+    const op = new OpaqueTestAllTypes(concat);
+    const subOp = op.getF8SubMsg();
+    expect(subOp?.id).toBe(20);
+    expect(subOp?.label).toBe('from-A');
+    expect(subOp?.flag).toBe(true);
+    expect(subOp?.score).toBe(-555);
+
+    // 2. Reusing a generated or schema struct when a singular sub-message is absent resets it to null
+    const reused = createTestAllTypes({
+      f1Uint32: 42,
+      f8SubMsg: createAllTypesSubMsg({ id: 9, label: 'stale', flag: true, score: 100 }),
+    });
+    decodeTestAllTypes(new Uint8Array(0), reused);
+    expect(reused.f1Uint32).toBe(0);
+    expect(reused.f8SubMsg).toBe(null);
+
+    const reusedSchema = TestAllTypesSchema.create({
+      f1Uint32: 42,
+      f8SubMsg: createAllTypesSubMsg({ id: 9, label: 'stale', flag: true, score: 100 }),
+    });
+    TestAllTypesSchema.decode(new Uint8Array(0), reusedSchema);
+    expect(reusedSchema.f1Uint32).toBe(0);
+    expect(reusedSchema.f8SubMsg).toBe(null);
+
+    // 3. readFixed*Arr / readSfixed*Arr reject mismatched element wire types (WireFloat32 / WireFloat64)
+    const float32Enc = new Encoder(32);
+    float32Enc.writeFloat32Arr(1, [1.5, 2.5]);
+    const float32Pkt = float32Enc.finish();
+    expect(readFixed32Arr(float32Pkt, 1)).toEqual([[], false]);
+    expect(readSfixed32Arr(float32Pkt, 1)).toEqual([[], false]);
+
+    const float64Enc = new Encoder(32);
+    float64Enc.writeFloat64Arr(1, [1.5, 2.5]);
+    const float64Pkt = float64Enc.finish();
+    expect(readFixed64Arr(float64Pkt, 1)).toEqual([[], false]);
+    expect(readSfixed64Arr(float64Pkt, 1)).toEqual([[], false]);
+  });
 });
