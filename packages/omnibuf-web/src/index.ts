@@ -38,7 +38,7 @@ import {
 export * from '@omnibuf/core';
 
 const browserEncoder = new TextEncoder();
-const browserDecoder = new TextDecoder('utf-8', { fatal: false });
+const browserDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Browser-optimized `StringCodec` using `TextEncoder.encodeInto` and `TextDecoder`.

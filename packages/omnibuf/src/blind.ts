@@ -428,7 +428,8 @@ function decodeBlindWithSchema(
   }
 
   const subPackets = new Map<number, Uint8Array[]>();
-  const arrayElemTypes = new Map<number, number>();
+  const fieldShapes = new Map<number, number>();
+  const fieldNames = new Map<string, number>();
   let pos = 0;
 
   while (pos < n) {
@@ -444,6 +445,22 @@ function decodeBlindWithSchema(
     }
 
     const name = activeSchema?.fields?.[fieldNum] || `field_${fieldNum}`;
+    const previousField = fieldNames.get(name);
+    if (previousField !== undefined && previousField !== fieldNum) {
+      throw new Error(`omnibuf: fields ${previousField} and ${fieldNum} share name ${name}`);
+    }
+    fieldNames.set(name, fieldNum);
+    let shape = wt === WireBoolTrue ? WireBoolFalse : wt;
+    if (wt === WireArray || wt === WireMap) {
+      const [body] = readLenSlice(data, pos, wt === WireArray ? 2 : 3);
+      shape |= body[0]! << 8;
+      if (wt === WireMap) shape |= body[1]! << 16;
+    }
+    const previousShape = fieldShapes.get(fieldNum);
+    if (previousShape !== undefined && previousShape !== shape) {
+      throw new Error(`omnibuf: field ${fieldNum} changes wire shape within one message`);
+    }
+    fieldShapes.set(fieldNum, shape);
     const childSchema = activeSchema?.children?.[fieldNum] ?? null;
     if (!Object.hasOwn(out, name) && wt !== WireSubMsg) setOwn(out, name, undefined);
 
@@ -497,15 +514,10 @@ function decodeBlindWithSchema(
       }
       case WireArray: {
         const [body, nextPos] = readLenSlice(data, pos, 2);
-        const [elemType, , , ok] = parseArrayHeader(body);
+        const [, , , ok] = parseArrayHeader(body);
         if (!ok) {
           throw new Error(`omnibuf: invalid WireArray header at ${pos}`);
         }
-        const prevElemType = arrayElemTypes.get(fieldNum);
-        if (prevElemType !== undefined && prevElemType !== elemType) {
-          throw new Error(`omnibuf: conflicting WireArray element types for field ${fieldNum}`);
-        }
-        arrayElemTypes.set(fieldNum, elemType);
         const prev = Array.isArray(out[name]) ? (out[name] as unknown[]) : [];
         out[name] = decodeArrayBodyBlind(prev, body, childSchema, depth, options);
         pos = nextPos;

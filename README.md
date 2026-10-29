@@ -118,6 +118,13 @@ just test
 just conformance
 ```
 
+The conformance runner and shared corpus are pinned to upstream OmniBuf revision
+`51e21054466e649501c42ddf63196ad1ea41c72b`. The first run downloads and builds the
+runner with Go; subsequent runs reuse the binary cached by revision under `bin/`.
+Set `CONFORMANCE_RUNNER` to an existing runner binary to test another version.
+When updating the suite, update both the revision in `scripts/run-conformance.mjs`
+and `testdata/conformance_corpus.json` from the same upstream commit.
+
 ---
 
 ## License

@@ -43,6 +43,12 @@ const TelemetryEvent = defineMessage<{
 });
 
 describe('@omnibuf/web - Browser codecs, Binary Helpers, Web Streams, and Packet Inspector', () => {
+  it('rejects invalid UTF-8 in buffer slices and preserves a leading BOM', () => {
+    assert.throws(() => BrowserStringCodec.decode(Uint8Array.from([0x61, 0xff, 0x62]), 1, 2));
+    const text = '\ufeffUnicode 😀';
+    assert.equal(BrowserStringCodec.decode(BrowserStringCodec.encode(text)), text);
+  });
+
   it('encodes and decodes UTF-8 strings with BrowserStringCodec including astral plane codepoints', () => {
     const str = 'OmniBuf Frontend 🌐⚡🔥';
     const len = BrowserStringCodec.byteLength(str);

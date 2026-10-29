@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
+import { isUtf8 } from 'node:buffer';
 import { Transform, type Readable, type Writable } from 'node:stream';
 import {
   DescriptorRegistry,
@@ -46,6 +47,7 @@ export const NodeBufferStringCodec: StringCodec = {
     const ascii = fastDecodeShortASCII(bytes, start, end);
     if (ascii !== null) return ascii;
     const buf = Buffer.from(bytes.buffer, bytes.byteOffset + start, end - start);
+    if (!isUtf8(buf)) throw new Error('omnibuf: invalid UTF-8 string');
     return buf.toString('utf8');
   },
   byteLength(str: string): number {

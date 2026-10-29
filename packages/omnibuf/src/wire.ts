@@ -186,7 +186,7 @@ export interface StringCodec {
 }
 
 const sharedTextEncoder = new TextEncoder();
-const sharedTextDecoder = new TextDecoder('utf-8', { fatal: false });
+const sharedTextDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Fast-path pure-JS decoder for short ASCII strings (`<= 64` bytes).

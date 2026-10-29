@@ -7,29 +7,28 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const adapterPath = resolve(rootDir, 'packages/omnibuf-node/dist/bin/conformance-es.js');
-const localRunner = resolve(rootDir, 'bin/conformance-runner');
-const siblingGoRepo = resolve(rootDir, '../omnibuf');
+// Keep the runner and testdata/conformance_corpus.json on the same upstream revision.
+const upstreamRevision = '51e21054466e649501c42ddf63196ad1ea41c72b';
+const runnerDir = resolve(rootDir, 'bin/conformance', upstreamRevision);
+const localRunner = resolve(runnerDir, 'conformance-runner');
 
 function resolveRunnerBinary() {
   if (process.env.CONFORMANCE_RUNNER && existsSync(process.env.CONFORMANCE_RUNNER)) {
     return process.env.CONFORMANCE_RUNNER;
   }
-  mkdirSync(resolve(rootDir, 'bin'), { recursive: true });
-  if (existsSync(resolve(siblingGoRepo, 'cmd/conformance-runner/main.go'))) {
-    execFileSync('go', ['build', '-o', localRunner, './cmd/conformance-runner'], {
-      cwd: siblingGoRepo,
-      stdio: 'inherit',
-    });
-    return localRunner;
-  }
   if (existsSync(localRunner)) {
     return localRunner;
   }
-  execFileSync('go', ['install', 'github.com/sudorandom/omnibuf/cmd/conformance-runner@main'], {
-    cwd: rootDir,
-    env: { ...process.env, GOBIN: resolve(rootDir, 'bin') },
-    stdio: 'inherit',
-  });
+  mkdirSync(runnerDir, { recursive: true });
+  execFileSync(
+    'go',
+    ['install', `github.com/sudorandom/omnibuf/cmd/conformance-runner@${upstreamRevision}`],
+    {
+      cwd: rootDir,
+      env: { ...process.env, GOBIN: runnerDir },
+      stdio: 'inherit',
+    },
+  );
   return localRunner;
 }
 

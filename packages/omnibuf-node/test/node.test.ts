@@ -53,6 +53,12 @@ const CORPUS_PATH = fileURLToPath(
 );
 
 describe('@omnibuf/node - NodeBufferStringCodec & Node Streams Framing', () => {
+  it('rejects invalid UTF-8 in buffer slices and preserves a leading BOM', () => {
+    assert.throws(() => NodeBufferStringCodec.decode(Uint8Array.from([0x61, 0xff, 0x62]), 1, 2));
+    const text = '\ufeffUnicode 😀';
+    assert.equal(NodeBufferStringCodec.decode(NodeBufferStringCodec.encode(text)), text);
+  });
+
   it('encodes and decodes UTF-8 strings via Node Buffer', () => {
     const text = 'Hello from Node.js Buffer codec 🛰️';
     const len = NodeBufferStringCodec.byteLength(text);

@@ -116,6 +116,33 @@ it('counts isolated UTF-16 surrogates like TextEncoder', () => {
   }
 });
 
+it('rejects malformed UTF-8 and preserves a leading BOM in wire strings', () => {
+  const codec = getStringCodec();
+  for (const bytes of [
+    [0xff],
+    [0xc0, 0x80],
+    [0xed, 0xa0, 0x80],
+    [0xf4, 0x90, 0x80, 0x80],
+    [0xe2, 0x82],
+  ]) {
+    assert.throws(() => codec.decode(Uint8Array.from(bytes)));
+  }
+  const text = '\ufeffUnicode 😀';
+  assert.equal(codec.decode(codec.encode(text)), text);
+});
+
+it('merges repeated scalar and boolean fields with matching wire shapes', () => {
+  const schema = defineMessage('RepeatedScalars', {
+    value: { fieldNum: 1, type: 'uint32' },
+    enabled: { fieldNum: 2, type: 'bool' },
+  });
+  const packet = concatMessages(
+    schema.encode({ value: 1, enabled: false }),
+    schema.encode({ value: 2, enabled: true }),
+  );
+  assert.deepEqual(decodeBlind(packet), { field_1: 2, field_2: true });
+});
+
 it('accepts all valid prefix widths and rejects reserved nonzero 9-byte markers', () => {
   assert.deepEqual(decodeVarintBigInt(Uint8Array.from([2, 0])), [0n, 2]);
   assert.deepEqual(decodeVarintBigInt(Uint8Array.from([4, 0, 0, 0])), [0n, 4]);
