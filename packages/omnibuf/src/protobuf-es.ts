@@ -1,4 +1,5 @@
 import { base64ToUint8Array, readField0SchemaMeta, uint8ArrayToBase64 } from './blind.js';
+import { MaxNestingDepth, decodeUTF8 } from './wire.js';
 import {
   defineMessage,
   protoCamelCase,
@@ -576,12 +577,27 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
     let result = 0n;
     let shift = 0n;
     while (pos < b.length) {
+      if (shift >= 64n) {
+        throw new Error('omnibuf: protobuf varint overflow');
+      }
       const byte = b[pos++]!;
+      if (shift === 63n && byte > 1) {
+        throw new Error('omnibuf: protobuf varint overflow');
+      }
       result |= BigInt(byte & 0x7f) << shift;
       if ((byte & 0x80) === 0) return [result, pos];
       shift += 7n;
     }
     throw new Error('omnibuf: unexpected EOF in protobuf varint');
+  }
+
+  function readPbBytes(b: Uint8Array, pos: number): [Uint8Array, number] {
+    const [len, p2] = readPbVarint(b, pos);
+    if (len > BigInt(b.length - p2)) {
+      throw new Error('omnibuf: truncated protobuf length-delimited field');
+    }
+    const n = Number(len);
+    return [b.subarray(p2, p2 + n), p2 + n];
   }
 
   function skipPbField(b: Uint8Array, pos: number, wireType: number): number {
@@ -590,14 +606,22 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
         const [, nextPos] = readPbVarint(b, pos);
         return nextPos;
       }
-      case 1:
+      case 1: {
+        if (b.length - pos < 8) {
+          throw new Error('omnibuf: truncated protobuf 64-bit field');
+        }
         return pos + 8;
-      case 2: {
-        const [len, nextPos] = readPbVarint(b, pos);
-        return nextPos + Number(len);
       }
-      case 5:
+      case 2: {
+        const [, nextPos] = readPbBytes(b, pos);
+        return nextPos;
+      }
+      case 5: {
+        if (b.length - pos < 4) {
+          throw new Error('omnibuf: truncated protobuf 32-bit field');
+        }
         return pos + 4;
+      }
       default:
         throw new Error(`omnibuf: unsupported protobuf wire type ${wireType}`);
     }
@@ -612,9 +636,9 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
       const fieldNum = Number(tag >> 3n);
       const wt = Number(tag & 7n);
       if (wt === 2 && (fieldNum === 1 || fieldNum === 6 || fieldNum === 10)) {
-        const [len, p2] = readPbVarint(b, pos);
-        const str = new TextDecoder().decode(b.subarray(p2, p2 + Number(len)));
-        pos = p2 + Number(len);
+        const [sub, nextPos] = readPbBytes(b, pos);
+        const str = decodeUTF8(sub);
+        pos = nextPos;
         if (fieldNum === 1) out.name = str;
         else if (fieldNum === 6) out.typeName = str;
         else if (fieldNum === 10) out.jsonName = str;
@@ -645,9 +669,9 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
       const fieldNum = Number(tag >> 3n);
       const wt = Number(tag & 7n);
       if (wt === 2 && fieldNum === 1) {
-        const [len, p2] = readPbVarint(b, pos);
-        out.name = new TextDecoder().decode(b.subarray(p2, p2 + Number(len)));
-        pos = p2 + Number(len);
+        const [sub, nextPos] = readPbBytes(b, pos);
+        out.name = decodeUTF8(sub);
+        pos = nextPos;
       } else {
         pos = skipPbField(b, pos, wt);
       }
@@ -664,9 +688,9 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
       const fieldNum = Number(tag >> 3n);
       const wt = Number(tag & 7n);
       if (wt === 2 && fieldNum === 1) {
-        const [len, p2] = readPbVarint(b, pos);
-        out.name = new TextDecoder().decode(b.subarray(p2, p2 + Number(len)));
-        pos = p2 + Number(len);
+        const [sub, nextPos] = readPbBytes(b, pos);
+        out.name = decodeUTF8(sub);
+        pos = nextPos;
       } else if (wt === 0 && fieldNum === 2) {
         const [val, p2] = readPbVarint(b, pos);
         out.number = Number(BigInt.asIntN(32, val));
@@ -687,10 +711,9 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
       const fieldNum = Number(tag >> 3n);
       const wt = Number(tag & 7n);
       if (wt === 2 && (fieldNum === 1 || fieldNum === 2)) {
-        const [len, p2] = readPbVarint(b, pos);
-        const sub = b.subarray(p2, p2 + Number(len));
-        pos = p2 + Number(len);
-        if (fieldNum === 1) out.name = new TextDecoder().decode(sub);
+        const [sub, nextPos] = readPbBytes(b, pos);
+        pos = nextPos;
+        if (fieldNum === 1) out.name = decodeUTF8(sub);
         else if (fieldNum === 2) out.value!.push(decodeEnumValueDescriptor(sub));
       } else {
         pos = skipPbField(b, pos, wt);
@@ -718,7 +741,12 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
     return out;
   }
 
-  function decodeDescriptorProto(b: Uint8Array): DescriptorProtoJSON {
+  function decodeDescriptorProto(b: Uint8Array, depth = 0): DescriptorProtoJSON {
+    if (depth > MaxNestingDepth) {
+      throw new Error(
+        `omnibuf: descriptor nesting depth ${depth} exceeds MaxNestingDepth (${MaxNestingDepth})`,
+      );
+    }
     const out: DescriptorProtoJSON = { field: [], nestedType: [], enumType: [], oneofDecl: [] };
     let pos = 0;
     while (pos < b.length) {
@@ -735,12 +763,11 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
           fieldNum === 7 ||
           fieldNum === 8)
       ) {
-        const [len, p2] = readPbVarint(b, pos);
-        const sub = b.subarray(p2, p2 + Number(len));
-        pos = p2 + Number(len);
-        if (fieldNum === 1) out.name = new TextDecoder().decode(sub);
+        const [sub, nextPos] = readPbBytes(b, pos);
+        pos = nextPos;
+        if (fieldNum === 1) out.name = decodeUTF8(sub);
         else if (fieldNum === 2) out.field!.push(decodeFieldDescriptor(sub));
-        else if (fieldNum === 3) out.nestedType!.push(decodeDescriptorProto(sub));
+        else if (fieldNum === 3) out.nestedType!.push(decodeDescriptorProto(sub, depth + 1));
         else if (fieldNum === 4) out.enumType!.push(decodeEnumDescriptor(sub));
         else if (fieldNum === 7) out.options = decodeMessageOptions(sub);
         else if (fieldNum === 8) out.oneofDecl!.push(decodeOneofDescriptor(sub));
@@ -768,15 +795,14 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
           fieldNum === 5 ||
           fieldNum === 12)
       ) {
-        const [len, p2] = readPbVarint(b, pos);
-        const sub = b.subarray(p2, p2 + Number(len));
-        pos = p2 + Number(len);
-        if (fieldNum === 1) out.name = new TextDecoder().decode(sub);
-        else if (fieldNum === 2) out.package = new TextDecoder().decode(sub);
-        else if (fieldNum === 3) out.dependency!.push(new TextDecoder().decode(sub));
-        else if (fieldNum === 4) out.messageType!.push(decodeDescriptorProto(sub));
+        const [sub, nextPos] = readPbBytes(b, pos);
+        pos = nextPos;
+        if (fieldNum === 1) out.name = decodeUTF8(sub);
+        else if (fieldNum === 2) out.package = decodeUTF8(sub);
+        else if (fieldNum === 3) out.dependency!.push(decodeUTF8(sub));
+        else if (fieldNum === 4) out.messageType!.push(decodeDescriptorProto(sub, 0));
         else if (fieldNum === 5) out.enumType!.push(decodeEnumDescriptor(sub));
-        else if (fieldNum === 12) out.syntax = new TextDecoder().decode(sub);
+        else if (fieldNum === 12) out.syntax = decodeUTF8(sub);
       } else {
         pos = skipPbField(b, pos, wt);
       }
@@ -792,9 +818,8 @@ export function parseBinaryFileDescriptorSet(buf: Uint8Array): FileDescriptorSet
     const fieldNum = Number(tag >> 3n);
     const wt = Number(tag & 7n);
     if (wt === 2 && fieldNum === 1) {
-      const [len, p2] = readPbVarint(buf, pos);
-      const sub = buf.subarray(p2, p2 + Number(len));
-      pos = p2 + Number(len);
+      const [sub, nextPos] = readPbBytes(buf, pos);
+      pos = nextPos;
       fds.file!.push(decodeFileDescriptor(sub));
     } else {
       pos = skipPbField(buf, pos, wt);

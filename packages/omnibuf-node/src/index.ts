@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { isUtf8 } from 'node:buffer';
 import { Transform, type Readable, type Writable } from 'node:stream';
@@ -218,6 +218,9 @@ export async function* readFrames(
   options?: { maxFrameBytes?: number },
 ): AsyncGenerator<Uint8Array, void, unknown> {
   const maxFrameBytes = options?.maxFrameBytes ?? 16 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
+    throw new Error(`omnibuf/node: invalid maxFrameBytes ${maxFrameBytes}`);
+  }
   const queue = new FrameBufferQueue();
 
   for await (const chunk of stream) {
@@ -273,6 +276,9 @@ export function createFrameEncoderStream(): Transform {
  */
 export function createFrameDecoderStream(options?: { maxFrameBytes?: number }): Transform {
   const maxFrameBytes = options?.maxFrameBytes ?? 16 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
+    throw new Error(`omnibuf/node: invalid maxFrameBytes ${maxFrameBytes}`);
+  }
   const queue = new FrameBufferQueue();
 
   return new Transform({
@@ -360,18 +366,72 @@ export function writePacketFileSync(filePath: string, packet: Uint8Array): void 
   writeFileSync(filePath, packet);
 }
 
+export const DefaultMaxSchemaBytes = 64 * 1024 * 1024;
+
+function readBoundedFileSync(filePath: string, maxBytes: number): Buffer {
+  const fd = openSync(filePath, 'r');
+  try {
+    const stat = fstatSync(fd);
+    if (stat.isFile() && stat.size > maxBytes) {
+      throw new Error(`omnibuf/node: schema exceeds limit of ${maxBytes} bytes`);
+    }
+    if (stat.isFile()) {
+      const buf = Buffer.allocUnsafe(stat.size);
+      let offset = 0;
+      while (offset < stat.size) {
+        const n = readSync(fd, buf, offset, stat.size - offset, offset);
+        if (n === 0) break;
+        offset += n;
+      }
+      return offset === buf.length ? buf : buf.subarray(0, offset);
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const scratch = Buffer.allocUnsafe(Math.min(65536, maxBytes + 1));
+    while (true) {
+      const n = readSync(fd, scratch, 0, scratch.length, null);
+      if (n === 0) break;
+      total += n;
+      if (total > maxBytes) {
+        throw new Error(`omnibuf/node: schema exceeds limit of ${maxBytes} bytes`);
+      }
+      chunks.push(Buffer.from(scratch.subarray(0, n)));
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * Load a `FileDescriptorSet` from `.fds.json`, `.fds.pb`, or `.fds.pb.gz` and return a `DescriptorRegistry`.
  */
-export function loadDescriptorRegistrySync(filePath: string): DescriptorRegistry {
+export function loadDescriptorRegistrySync(
+  filePath: string,
+  options?: { maxSchemaBytes?: number },
+): DescriptorRegistry {
+  const maxSchemaBytes = options?.maxSchemaBytes ?? DefaultMaxSchemaBytes;
+  if (!Number.isSafeInteger(maxSchemaBytes) || maxSchemaBytes <= 0) {
+    throw new Error(`omnibuf/node: invalid maxSchemaBytes ${maxSchemaBytes}`);
+  }
+  let raw = readBoundedFileSync(filePath, maxSchemaBytes);
   if (filePath.endsWith('.json')) {
-    const text = readFileSync(filePath, 'utf8');
+    const text = raw.toString('utf8');
     const fds = JSON.parse(text) as FileDescriptorSetJSON;
     return new DescriptorRegistry(fds);
   }
-  let raw = readFileSync(filePath);
   if (filePath.endsWith('.gz') || (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b)) {
-    raw = gunzipSync(raw);
+    try {
+      raw = gunzipSync(raw, { maxOutputLength: maxSchemaBytes });
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError) {
+        throw new Error(`omnibuf/node: schema exceeds limit of ${maxSchemaBytes} bytes`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
   }
   const fds = parseBinaryFileDescriptorSet(
     new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength),

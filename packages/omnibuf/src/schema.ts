@@ -1415,7 +1415,12 @@ function initFieldValue(f: CompiledField, val: any): unknown {
     }
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(val as Record<string, any>)) {
-      out[k] = isSubMsgVal ? sub.create(v) : v;
+      Object.defineProperty(out, k, {
+        value: isSubMsgVal ? sub.create(v) : v,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
     return out;
   }
@@ -1474,7 +1479,12 @@ function cloneFieldValue(f: CompiledField, val: any): unknown {
     }
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(val as Record<string, any>)) {
-      out[k] = isSubMsgVal ? sub.clone(v) : v;
+      Object.defineProperty(out, k, {
+        value: isSubMsgVal ? sub.clone(v) : v,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
     return out;
   }
@@ -2064,9 +2074,15 @@ function decodeCompiledFieldValue(
     case 'uint64[]': {
       const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: (number | bigint)[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
+      const startLen = prev.length;
       const [arr, ok] = appendUintArrAutoBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid uint64 array at ${pos}`);
-      out[key] = f.useBigInt ? arr.map((x) => BigInt(x)) : arr;
+      if (f.useBigInt) {
+        for (let i = startLen; i < arr.length; i++) {
+          arr[i] = BigInt(arr[i]!);
+        }
+      }
+      out[key] = arr;
       return nextPos;
     }
     case 'sint32[]':
@@ -2075,18 +2091,28 @@ function decodeCompiledFieldValue(
     case 'int64[]': {
       const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: (number | bigint)[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
+      const startLen = prev.length;
       const [arr, ok] = appendSintArrAutoBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid sint array at ${pos}`);
       const is64 = f.effectiveType === 'sint64[]' || f.effectiveType === 'int64[]';
-      out[key] = f.useBigInt && is64 ? arr.map((x) => BigInt(x)) : arr;
+      if (f.useBigInt && is64) {
+        for (let i = startLen; i < arr.length; i++) {
+          arr[i] = BigInt(arr[i]!);
+        }
+      }
+      out[key] = arr;
       return nextPos;
     }
     case 'float32[]': {
       const [body, nextPos] = readLenSlice(data, pos, 2);
       const prev: number[] = alreadySeen && Array.isArray(out[key]) ? out[key] : [];
+      const startLen = prev.length;
       const [arr, ok] = appendFloat32ArrBody(prev, body);
       if (!ok) throw new Error(`omnibuf: invalid float32 array at ${pos}`);
-      out[key] = arr.map(roundFloat32Shortest);
+      for (let i = startLen; i < arr.length; i++) {
+        arr[i] = roundFloat32Shortest(arr[i]!);
+      }
+      out[key] = arr;
       return nextPos;
     }
     case 'fixed32[]': {

@@ -48,6 +48,7 @@ import {
   mergeFromBinary,
   omnibufField,
   omnibufMessage,
+  parseBinaryFileDescriptorSet,
   readBool,
   readBytes,
   readField0SchemaMeta,
@@ -72,9 +73,11 @@ import {
   toBinary,
   unmarshal,
   unmarshalProto,
+  writeField0SchemaMeta,
   writeVarintAt,
   type Message,
   type ProtobufDescMessage,
+  type SchemaMeta,
 } from '../src/index.js';
 
 describe('@omnibuf/core - Prefix-Varint & ZigZag primitives', () => {
@@ -542,5 +545,258 @@ describe('@omnibuf/core - Tier 2 (@bufbuild/protobuf DescMessage) & Tier 3 (Deco
     expect(reg.getSchema('pkg.a.Item')?.typeName).toBe('pkg.a.Item');
     expect(reg.getSchema('pkg.b.Item')?.typeName).toBe('pkg.b.Item');
     expect(reg.getSchema('Item')?.typeName).toBe('pkg.a.Item');
+  });
+
+  it('overlays Field #0 schemas in decodeBlind without quadratic copying and supports empty-string field name masking', () => {
+    // 1. Nested overlay merges (matching upstream TestBlindSchemaOverlayNestedMerges)
+    const rootMeta: SchemaMeta = {
+      typeName: 'test.Parent',
+      fields: { 1: 'child' },
+      children: {
+        1: {
+          typeName: 'test.ChildFromRoot',
+          fields: {
+            1: 'from_root',
+            2: 'override_me',
+            3: 'clear_me',
+            4: 'nested',
+          },
+          children: {
+            4: {
+              typeName: 'test.GrandFromRoot',
+              fields: { 1: 'grand_root', 2: 'grand_override' },
+            },
+          },
+        },
+      },
+    };
+    const childLocalMeta1: SchemaMeta = {
+      fields: { 2: 'from_child_1', 3: '' },
+      children: {
+        4: { fields: { 2: 'grand_child_1', 3: 'grand_extra' } },
+      },
+    };
+    const childLocalMeta2: SchemaMeta = {
+      fields: { 2: 'from_child_2', 5: 'tail_only' },
+    };
+
+    const grandEnc = new Encoder(32);
+    grandEnc.writeUint(1, 10);
+    grandEnc.writeUint(2, 20);
+    grandEnc.writeUint(3, 30);
+    const grandBytes = grandEnc.finish();
+
+    const childEnc = new Encoder(128);
+    writeField0SchemaMeta(childEnc, childLocalMeta1, true);
+    childEnc.writeUint(1, 1);
+    childEnc.writeUint(2, 2);
+    childEnc.writeUint(3, 3);
+    childEnc.beginSubMsg(4);
+    childEnc.writeRaw(grandBytes);
+    childEnc.endSubMsg();
+    childEnc.writeUint(5, 5);
+    writeField0SchemaMeta(childEnc, childLocalMeta2, true);
+    const childBytes = childEnc.finish();
+
+    const pktEnc = new Encoder(256);
+    writeField0SchemaMeta(pktEnc, rootMeta, true);
+    pktEnc.beginSubMsg(1);
+    pktEnc.writeRaw(childBytes);
+    pktEnc.endSubMsg();
+
+    const got = decodeBlind(pktEnc.finish());
+    expect(got).toEqual({
+      child: {
+        from_root: 1,
+        from_child_2: 2,
+        field_3: 3,
+        tail_only: 5,
+        nested: {
+          grand_root: 10,
+          grand_child_1: 20,
+          grand_extra: 30,
+        },
+      },
+    });
+
+    // 2. Shared 1,000-field schema across 2,000 submessages (with and without local Field #0 overrides)
+    const childFields: Record<number, string> = {};
+    for (let i = 1; i <= 1000; i++) {
+      childFields[i] = `field_name_${i}`;
+    }
+    const largeRootMeta: SchemaMeta = {
+      typeName: 'bench.Root',
+      fields: { 2: 'items' },
+      children: {
+        2: {
+          typeName: 'bench.Item',
+          fields: childFields,
+        },
+      },
+    };
+    const localOverrideMeta: SchemaMeta = {
+      fields: { 1001: 'local_extra' },
+    };
+
+    for (const withLocalOverride of [false, true]) {
+      const enc = new Encoder(32768);
+      writeField0SchemaMeta(enc, largeRootMeta, true);
+      enc.beginSubMsgArr(2);
+      for (let i = 0; i < 2000; i++) {
+        enc.beginSubMsgElem();
+        enc.writeUint(1, i);
+        if (withLocalOverride) {
+          writeField0SchemaMeta(enc, localOverrideMeta, true);
+        }
+        enc.endSubMsgElem();
+      }
+      enc.endSubMsgArr();
+      const decoded = decodeBlind(enc.finish());
+      const items = decoded.items as Array<Record<string, unknown>>;
+      expect(items.length).toBe(2000);
+      expect(items[0]?.field_name_1).toBe(0);
+      expect(items[1999]?.field_name_1).toBe(1999);
+    }
+  });
+
+  it('decodes heavily fragmented repeated fields in linear time without quadratic array reallocation', () => {
+    const FragSchema = defineMessage<{
+      floats: number[];
+      u64s: bigint[];
+      s64s: bigint[];
+      strs: string[];
+    }>('omnibuf.test.Frag', {
+      floats: { fieldNum: 1, type: 'float32[]' },
+      u64s: { fieldNum: 2, type: 'uint64[]', useBigInt: true },
+      s64s: { fieldNum: 3, type: 'sint64[]', useBigInt: true },
+      strs: { fieldNum: 4, type: 'string[]' },
+    });
+
+    const count = 2000;
+    const enc = new Encoder(count * 32);
+    for (let i = 0; i < count; i++) {
+      enc.writeFloat32Arr(1, [1.5]);
+      enc.writeUintArr(2, [i]);
+      enc.writeSintArr(3, [-i]);
+      enc.writeStringArr(4, ['x']);
+    }
+    const packet = enc.finish();
+
+    const msg = FragSchema.decode(packet);
+    expect(msg.floats.length).toBe(count);
+    expect(msg.floats[0]).toBe(1.5);
+    expect(msg.u64s.length).toBe(count);
+    expect(msg.u64s[count - 1]).toBe(BigInt(count - 1));
+    expect(msg.s64s.length).toBe(count);
+    expect(msg.s64s[count - 1]).toBe(BigInt(-(count - 1)));
+    expect(msg.strs.length).toBe(count);
+  });
+
+  it('sorts large deterministic maps with long common prefixes identically across Encoder and MessageSchema', () => {
+    const MapHolderSchema = defineMessage<{ entries: Record<string, number> }>(
+      'omnibuf.test.MapHolder',
+      {
+        entries: { fieldNum: 12, type: 'map', mapKey: 'string', mapVal: 'uint64' },
+      },
+    );
+    const prefix = 'p'.repeat(2048);
+
+    for (const n of [16, 17, 512]) {
+      const entries: Record<string, number> = {};
+      for (let i = n - 1; i >= 0; i--) {
+        const key = `${prefix}:${String((i * 73) % n).padStart(6, '0')}`;
+        entries[key] = i + 1;
+      }
+
+      const rawEnc = new Encoder(4096);
+      rawEnc.writeMapStringUintDeterministic(12, entries);
+      const rawBytes = rawEnc.finish();
+
+      const schemaBytes = MapHolderSchema.encode({ entries }, { deterministic: true });
+      expect(schemaBytes).toEqual(rawBytes);
+    }
+  });
+
+  it('preserves __proto__ map keys as own properties across create(), clone(), encode(), and decode()', () => {
+    const SubSchema = defineMessage<{ label: string }>('omnibuf.test.Sub', {
+      label: { fieldNum: 1, type: 'string' },
+    });
+    const HolderSchema = defineMessage<{
+      scalars: Record<string, number>;
+      subs: Record<string, { label: string }>;
+    }>('omnibuf.test.Holder', {
+      scalars: { fieldNum: 1, type: 'map', mapKey: 'string', mapVal: 'uint32' },
+      subs: {
+        fieldNum: 2,
+        type: 'map',
+        mapKey: 'string',
+        mapVal: 'submsg',
+        subSchema: () => SubSchema,
+      },
+    });
+
+    const rawScalars: Record<string, number> = {};
+    Object.defineProperty(rawScalars, '__proto__', {
+      value: 77,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    const rawSubs: Record<string, { label: string }> = {};
+    Object.defineProperty(rawSubs, '__proto__', {
+      value: { label: 'safe-sub' },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+
+    const created = HolderSchema.create({ scalars: rawScalars, subs: rawSubs });
+    expect(Object.getPrototypeOf(created.scalars)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(created.subs)).toBe(Object.prototype);
+    expect(Object.hasOwn(created.scalars, '__proto__')).toBe(true);
+    expect(Object.hasOwn(created.subs, '__proto__')).toBe(true);
+
+    const cloned = HolderSchema.clone(created);
+    expect(Object.getPrototypeOf(cloned.scalars)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(cloned.subs)).toBe(Object.prototype);
+    expect(Object.hasOwn(cloned.scalars, '__proto__')).toBe(true);
+    expect(Object.hasOwn(cloned.subs, '__proto__')).toBe(true);
+    expect(
+      (Object.getOwnPropertyDescriptor(cloned.subs, '__proto__')?.value as { label: string }).label,
+    ).toBe('safe-sub');
+
+    const decoded = HolderSchema.decode(HolderSchema.encode(cloned));
+    expect(Object.getPrototypeOf(decoded.scalars)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(decoded.subs)).toBe(Object.prototype);
+    expect(Object.hasOwn(decoded.scalars, '__proto__')).toBe(true);
+    expect(Object.hasOwn(decoded.subs, '__proto__')).toBe(true);
+  });
+
+  it('grows zero-length initial Encoder buffers safely and rejects malformed binary FileDescriptorSets', () => {
+    const zeroEnc = new Encoder(new Uint8Array(0));
+    zeroEnc.writeUint(1, 12345);
+    zeroEnc.writeString(2, 'grown');
+    const pkt = zeroEnc.finish();
+    expect(readUint(pkt, 1)).toEqual([12345, true]);
+    expect(readString(pkt, 2)).toEqual(['grown', true]);
+
+    // Truncated length-delimited field in FileDescriptorSet
+    assert.throws(
+      () => parseBinaryFileDescriptorSet(new Uint8Array([0x0a, 0x50, 0x01, 0x02])),
+      /truncated protobuf length-delimited field/,
+    );
+    // Varint overflow (>10 continuation bytes) in FileDescriptorSet
+    assert.throws(
+      () =>
+        parseBinaryFileDescriptorSet(
+          new Uint8Array([0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
+        ),
+      /protobuf varint overflow/,
+    );
+    // Truncated 64-bit wire type 1 field in FileDescriptorSet
+    assert.throws(
+      () => parseBinaryFileDescriptorSet(new Uint8Array([0x09, 0x01, 0x02, 0x03])),
+      /truncated protobuf 64-bit field/,
+    );
   });
 });

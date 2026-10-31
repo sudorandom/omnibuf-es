@@ -99,7 +99,13 @@ export class Encoder {
    * Returns a standalone `Uint8Array` copy of `[startPos, this.pos)` in the slab.
    */
   endMessage(startPos: number): Uint8Array {
-    return this.buf.slice(startPos, this.pos);
+    const out = this.buf.slice(startPos, this.pos);
+    if (this.buf.length > 65536) {
+      this.buf = new Uint8Array(8192);
+      this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+      this.pos = 0;
+    }
+    return out;
   }
 
   /**
@@ -137,7 +143,7 @@ export class Encoder {
   ensureCapacity(additional: number): void {
     const needed = this.pos + additional;
     if (needed <= this.buf.length) return;
-    let nextCap = this.buf.length * 2;
+    let nextCap = Math.max(64, this.buf.length * 2);
     while (nextCap < needed) {
       nextCap *= 2;
     }

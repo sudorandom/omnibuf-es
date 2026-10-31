@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 
 function expect(actual: any, message?: string) {
   return {
@@ -730,5 +733,41 @@ describe('@omnibuf/node - Byte-for-byte Verification Against Golden Files & Conf
     const float64Pkt = float64Enc.finish();
     expect(readFixed64Arr(float64Pkt, 1)).toEqual([[], false]);
     expect(readSfixed64Arr(float64Pkt, 1)).toEqual([[], false]);
+  });
+
+  it('rejects oversized raw files and gzip decompression bombs in loadDescriptorRegistrySync', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'omnibuf-fds-test-'));
+    try {
+      const limit = 4096;
+
+      // 1. Oversized raw file
+      const rawPath = join(dir, 'oversized.fds.pb');
+      writeFileSync(rawPath, Buffer.alloc(limit + 1));
+      assert.throws(
+        () => loadDescriptorRegistrySync(rawPath, { maxSchemaBytes: limit }),
+        /exceeds limit/,
+      );
+
+      // 2. Single-member and multi-member concatenated gzip bombs whose compressed size is < limit
+      const memberA = gzipSync(Buffer.alloc(limit));
+      const memberB = gzipSync(Buffer.alloc(1));
+      const concatGz = Buffer.concat([memberA, memberB]);
+      expect(concatGz.byteLength < limit).toBe(true);
+
+      const gzPath = join(dir, 'bomb.fds.pb.gz');
+      writeFileSync(gzPath, concatGz);
+      assert.throws(
+        () => loadDescriptorRegistrySync(gzPath, { maxSchemaBytes: limit }),
+        /exceeds limit/,
+      );
+
+      // 3. Invalid maxSchemaBytes
+      assert.throws(
+        () => loadDescriptorRegistrySync(rawPath, { maxSchemaBytes: 0 }),
+        /invalid maxSchemaBytes/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

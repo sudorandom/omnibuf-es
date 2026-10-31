@@ -21,7 +21,6 @@ import {
   decodeVarintAuto,
   decodeVarintBigInt,
   decodeZigZagAuto,
-  encodeField0SchemaMeta,
   fastDecodeShortASCII,
   float32FromBits,
   float64FromBits,
@@ -346,6 +345,9 @@ export function createOmniBufDecodeStream(options?: {
   maxFrameBytes?: number;
 }): TransformStream<Uint8Array, Uint8Array> {
   const maxFrameBytes = options?.maxFrameBytes ?? 16 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
+    throw new Error(`omnibuf/web: invalid maxFrameBytes ${maxFrameBytes}`);
+  }
   const queue = new WebFrameBufferQueue();
 
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -437,7 +439,6 @@ export interface PacketInspection {
 export function inspectPacket(packet: Uint8Array): PacketInspection {
   const blind = decodeBlind(packet);
   const [schemaMeta] = readField0SchemaMeta(packet);
-  const f0Prefix = schemaMeta ? encodeField0SchemaMeta(schemaMeta, true) : null;
   const fields: InspectedField[] = [];
 
   let pos = 0;
@@ -454,7 +455,13 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
     let valEnd = tagEnd;
     let previewValue: unknown = null;
     const fieldName =
-      fieldNumber === 0 ? '_schema' : (schemaMeta?.fields?.[fieldNumber] ?? `field_${fieldNumber}`);
+      fieldNumber === 0
+        ? '_schema'
+        : schemaMeta?.fields &&
+            Object.hasOwn(schemaMeta.fields, fieldNumber) &&
+            schemaMeta.fields[fieldNumber]
+          ? schemaMeta.fields[fieldNumber]!
+          : `field_${fieldNumber}`;
 
     switch (wireType) {
       case WireBoolFalse:
@@ -571,16 +578,8 @@ export function inspectPacket(packet: Uint8Array): PacketInspection {
           // Decode this specific field slice in isolation so duplicate/concatenated occurrences
           // show their own slice value rather than only the final merged packet state
           const singleFieldSlice = packet.subarray(startOffset, valEnd);
-          if (f0Prefix) {
-            const combined = new Uint8Array(f0Prefix.length + singleFieldSlice.length);
-            combined.set(f0Prefix, 0);
-            combined.set(singleFieldSlice, f0Prefix.length);
-            const singleBlind = decodeBlind(combined);
-            previewValue = singleBlind[fieldName];
-          } else {
-            const singleBlind = decodeBlind(singleFieldSlice);
-            previewValue = singleBlind[fieldName];
-          }
+          const singleBlind = decodeBlind(singleFieldSlice, { inheritedSchema: schemaMeta });
+          previewValue = singleBlind[fieldName];
         }
         break;
       }

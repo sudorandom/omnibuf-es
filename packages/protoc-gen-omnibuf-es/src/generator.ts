@@ -886,9 +886,11 @@ function emitDecodeFieldCaseBody(f: ResolvedField, indent: string): string {
         return [
           `${indent}const [body, nextPos] = readLenSlice(buf, pos, 2, n);`,
           `${indent}const prev = alreadySeen && Array.isArray(${prop}) ? ${prop} : [];`,
+          `${indent}const startLen = prev.length;`,
           `${indent}const [arr, ok] = appendFloat32ArrBody(prev, body);`,
           `${indent}if (!ok) throw new Error('omnibuf: invalid float32 array');`,
-          `${indent}${prop} = arr.map(roundFloat32Shortest); pos = nextPos;`,
+          `${indent}for (let i = startLen; i < arr.length; i++) arr[i] = roundFloat32Shortest(arr[i]!);`,
+          `${indent}${prop} = arr; pos = nextPos;`,
         ].join('\n');
       case ProtoScalarType.DOUBLE:
         return [

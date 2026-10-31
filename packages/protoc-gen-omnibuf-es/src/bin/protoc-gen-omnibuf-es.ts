@@ -10,12 +10,27 @@ function readPbVarint(b: Uint8Array, pos: number): [ bigint, number ] {
   let result = 0n;
   let shift = 0n;
   while (pos < b.length) {
-    const byte = b[pos++];
+    if (shift >= 64n) {
+      throw new Error('protoc-gen-omnibuf-es: varint overflow');
+    }
+    const byte = b[pos++]!;
+    if (shift === 63n && byte > 1) {
+      throw new Error('protoc-gen-omnibuf-es: varint overflow');
+    }
     result |= BigInt(byte & 0x7f) << shift;
     if ((byte & 0x80) === 0) return [ result, pos ];
     shift += 7n;
   }
   throw new Error('protoc-gen-omnibuf-es: unexpected EOF in varint');
+}
+
+function readPbBytes(b: Uint8Array, pos: number): [ Uint8Array, number ] {
+  const [ len, p2 ] = readPbVarint(b, pos);
+  if (len > BigInt(b.length - p2)) {
+    throw new Error('protoc-gen-omnibuf-es: truncated length-delimited field');
+  }
+  const n = Number(len);
+  return [ b.subarray(p2, p2 + n), p2 + n ];
 }
 
 function writePbVarint(out: number[], val: number): void {
@@ -72,16 +87,15 @@ async function main(): Promise<void> {
     const fieldNum = Number(tag >> 3n);
     const wt = Number(tag & 7n);
     if (wt === 2 && fieldNum === 1) {
-      const [len, p2] = readPbVarint(reqBytes, pos);
-      const name = new TextDecoder().decode(reqBytes.subarray(p2, p2 + Number(len)));
+      const [sub, nextPos] = readPbBytes(reqBytes, pos);
+      const name = new TextDecoder().decode(sub);
       filesToGenerate.add(name);
-      pos = p2 + Number(len);
+      pos = nextPos;
     } else if (wt === 2 && fieldNum === 15) {
       // Field 15 in CodeGeneratorRequest is repeated FileDescriptorProto proto_file.
       // Wrap it as Field 1 of a FileDescriptorSet so parseBinaryFileDescriptorSet can parse it.
-      const [len, p2] = readPbVarint(reqBytes, pos);
-      const sub = reqBytes.subarray(p2, p2 + Number(len));
-      pos = p2 + Number(len);
+      const [sub, nextPos] = readPbBytes(reqBytes, pos);
+      pos = nextPos;
       const wrapped: number[] = [];
       writePbVarint(wrapped, (1 << 3) | 2);
       writePbVarint(wrapped, sub.length);
@@ -93,12 +107,20 @@ async function main(): Promise<void> {
       const [, p2] = readPbVarint(reqBytes, pos);
       pos = p2;
     } else if (wt === 2) {
-      const [len, p2] = readPbVarint(reqBytes, pos);
-      pos = p2 + Number(len);
+      const [, nextPos] = readPbBytes(reqBytes, pos);
+      pos = nextPos;
     } else if (wt === 1) {
+      if (reqBytes.length - pos < 8) {
+        throw new Error('protoc-gen-omnibuf-es: truncated 64-bit field');
+      }
       pos += 8;
     } else if (wt === 5) {
+      if (reqBytes.length - pos < 4) {
+        throw new Error('protoc-gen-omnibuf-es: truncated 32-bit field');
+      }
       pos += 4;
+    } else {
+      throw new Error(`protoc-gen-omnibuf-es: unsupported wire type ${wt}`);
     }
   }
 

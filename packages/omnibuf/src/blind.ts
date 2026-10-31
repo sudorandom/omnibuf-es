@@ -370,6 +370,42 @@ export interface DecodeBlindOptions {
    * When true (default), `WireFixed32` values are rounded to their shortest 32-bit IEEE-754 decimal representation.
    */
   roundFloat32?: boolean;
+  /**
+   * Optional pre-decoded `SchemaMeta` inherited by the packet before any local Field #0 overrides.
+   */
+  inheritedSchema?: SchemaMeta | null;
+}
+
+interface BlindSchema {
+  readonly local: SchemaMeta;
+  readonly parent: BlindSchema | null;
+}
+
+function wrapBlindSchema(
+  meta: SchemaMeta | null | undefined,
+  parent: BlindSchema | null,
+): BlindSchema | null {
+  if (!meta) return parent;
+  return { local: meta, parent };
+}
+
+function blindFieldName(schema: BlindSchema | null, fieldNum: number): string {
+  for (let s = schema; s !== null; s = s.parent) {
+    if (s.local.fields && Object.hasOwn(s.local.fields, fieldNum)) {
+      return s.local.fields[fieldNum]!;
+    }
+  }
+  return '';
+}
+
+function blindChildSchema(schema: BlindSchema | null, fieldNum: number): BlindSchema | null {
+  if (!schema) return null;
+  const parent = blindChildSchema(schema.parent, fieldNum);
+  const child =
+    schema.local.children && Object.hasOwn(schema.local.children, fieldNum)
+      ? schema.local.children[fieldNum]
+      : undefined;
+  return wrapBlindSchema(child, parent);
 }
 
 /**
@@ -382,12 +418,13 @@ export function decodeBlind(
   packet: Uint8Array,
   options?: DecodeBlindOptions,
 ): Record<string, unknown> {
-  return decodeBlindWithSchema(packet, null, 0, options ?? {});
+  const opts = options ?? {};
+  return decodeBlindWithSchema(packet, wrapBlindSchema(opts.inheritedSchema, null), 0, opts);
 }
 
 function decodeBlindWithSchema(
   data: Uint8Array,
-  inherited: SchemaMeta | null | undefined,
+  inherited: BlindSchema | null,
   depth: number,
   options: DecodeBlindOptions,
   target?: Record<string, unknown>,
@@ -400,7 +437,7 @@ function decodeBlindWithSchema(
     return target ?? {};
   }
 
-  let activeSchema: SchemaMeta | null = inherited ? mergeSchemaMeta(null, inherited) : null;
+  let localSchema: SchemaMeta | null = null;
   const out: Record<string, unknown> = target ?? {};
   const roundF32 = options.roundFloat32 !== false;
 
@@ -421,12 +458,13 @@ function decodeBlindWithSchema(
       const [f0Body, nextPos] = readLenSlice(data, scanPos, 0);
       scanPos = nextPos;
       const parsedMeta = decodeSchemaMeta(f0Body, depth + 1);
-      activeSchema = mergeSchemaMeta(activeSchema, parsedMeta);
+      localSchema = mergeSchemaMeta(localSchema, parsedMeta);
       continue;
     }
     scanPos = skipValue(data, scanPos, wt);
   }
 
+  const activeSchema = wrapBlindSchema(localSchema, inherited);
   const subPackets = new Map<number, Uint8Array[]>();
   const fieldShapes = new Map<number, number>();
   const fieldNames = new Map<string, number>();
@@ -444,7 +482,7 @@ function decodeBlindWithSchema(
       continue;
     }
 
-    const name = activeSchema?.fields?.[fieldNum] || `field_${fieldNum}`;
+    const name = blindFieldName(activeSchema, fieldNum) || `field_${fieldNum}`;
     const previousField = fieldNames.get(name);
     if (previousField !== undefined && previousField !== fieldNum) {
       throw new Error(`omnibuf: fields ${previousField} and ${fieldNum} share name ${name}`);
@@ -461,7 +499,6 @@ function decodeBlindWithSchema(
       throw new Error(`omnibuf: field ${fieldNum} changes wire shape within one message`);
     }
     fieldShapes.set(fieldNum, shape);
-    const childSchema = activeSchema?.children?.[fieldNum] ?? null;
     if (!Object.hasOwn(out, name) && wt !== WireSubMsg) setOwn(out, name, undefined);
 
     switch (wt) {
@@ -518,6 +555,7 @@ function decodeBlindWithSchema(
         if (!ok) {
           throw new Error(`omnibuf: invalid WireArray header at ${pos}`);
         }
+        const childSchema = blindChildSchema(activeSchema, fieldNum);
         const prev = Array.isArray(out[name]) ? (out[name] as unknown[]) : [];
         out[name] = decodeArrayBodyBlind(prev, body, childSchema, depth, options);
         pos = nextPos;
@@ -531,6 +569,7 @@ function decodeBlindWithSchema(
       }
       case WireMap: {
         const [body, nextPos] = readLenSlice(data, pos, 3);
+        const childSchema = blindChildSchema(activeSchema, fieldNum);
         const prev = out[name];
         const m: Record<string, unknown> =
           prev && typeof prev === 'object' && !Array.isArray(prev) && !(prev instanceof Uint8Array)
@@ -616,8 +655,8 @@ function decodeBlindWithSchema(
   }
 
   for (const [fieldNum, chunks] of subPackets.entries()) {
-    const name = activeSchema?.fields?.[fieldNum] || `field_${fieldNum}`;
-    const childSchema = activeSchema?.children?.[fieldNum] ?? null;
+    const name = blindFieldName(activeSchema, fieldNum) || `field_${fieldNum}`;
+    const childSchema = blindChildSchema(activeSchema, fieldNum);
     let combined: Uint8Array;
     if (chunks.length === 1) {
       combined = chunks[0]!;
@@ -640,7 +679,7 @@ function decodeBlindWithSchema(
 function decodeArrayBodyBlind(
   prev: unknown[],
   body: Uint8Array,
-  childSchema: SchemaMeta | null,
+  childSchema: BlindSchema | null,
   depth: number,
   options: DecodeBlindOptions,
 ): unknown[] {
@@ -824,7 +863,7 @@ function decodeArrayBodyBlind(
 function decodeMapBodyBlind(
   m: Record<string, unknown>,
   body: Uint8Array,
-  childSchema: SchemaMeta | null,
+  childSchema: BlindSchema | null,
   depth: number,
   options: DecodeBlindOptions,
 ): Record<string, unknown> {
@@ -931,7 +970,7 @@ function decodeMapValBlind(
   body: Uint8Array,
   p: number,
   valWT: number,
-  childSchema: SchemaMeta | null,
+  childSchema: BlindSchema | null,
   depth: number,
   options: DecodeBlindOptions,
 ): [val: unknown, nextPos: number] {
